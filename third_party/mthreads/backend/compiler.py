@@ -591,6 +591,25 @@ def _llc_extra_options(metadata: Dict[str, object], options: "MUSAOptions") -> l
     return opts
 
 
+def _set_ph1_b_row_shuffle_marker(mod, opt, arch, capability):
+    if not opt.ph1_m64up_b_row_shuffle_vector_store:
+        return
+    if not (opt.ph1_m64up_b_row_shuffle_vector_store is True
+            and opt.ph1_m64up_a_vector_store is True
+            and opt.enable_backend_opt is True and opt.backend_name == "musa"
+            and str(arch) == "31" and str(opt.arch) == "31" and capability == 31
+            and opt.num_warps == 4 and opt.num_ctas == 1 and opt.num_stages == 1
+            and tuple(opt.cluster_dims) == (1, 1, 1)
+            and opt.warp_size == _warp_size_from_capability(capability)):
+        raise ValueError("B row shuffle requires exact A-on MUSA31 W4/CTA1/S1 backend-opt")
+    builder = ir.builder(mod.context)
+    marker = "musa.ph1_m64up_b_row_shuffle_vector_store"
+    mod.set_attr(marker, builder.get_bool_attr(True))
+    mod.set_attr(marker + ".backend_opt", builder.get_bool_attr(True))
+    mod.set_attr(marker + ".num_stages", builder.get_int32_attr(opt.num_stages))
+    mod.set_attr(marker + ".warp_size", builder.get_int32_attr(opt.warp_size))
+
+
 @dataclass(frozen=True)
 class MUSAOptions:
     num_warps: int = 4
@@ -624,6 +643,13 @@ class MUSAOptions:
     arch: Optional[str] = None
     instrumentation_mode: str = ""
     inplace_alias_pairs: str = ""
+    # Explicit opt-in for the audited M64-up SQMMA A-operand PH1 vector store.
+    # Default False: no service caller sets it, so the vector store stays
+    # disabled. When True it is reflected into the module IR as
+    # `musa.ph1_m64up_a_vector_store` (+ the stage count) and participates in
+    # `hash()` (the MUSAOptions component of the compile cache key).
+    ph1_m64up_a_vector_store: bool = False
+    ph1_m64up_b_row_shuffle_vector_store: bool = False
 
     def __post_init__(self):
         default_libdir = Path(__file__).parent / "lib"
@@ -638,6 +664,16 @@ class MUSAOptions:
         hash_dict = dict(self.__dict__)
         if not hash_dict.get("inplace_alias_pairs"):
             hash_dict.pop("inplace_alias_pairs", None)
+        # This only keeps the *MUSAOptions.hash()* method result identical to
+        # the pre-change method for the default-off case (the field is dropped
+        # from hash_dict).  It does NOT keep the full Triton cache key fixed:
+        # triton_key() hashes backends/mthreads/compiler.py and libtriton, so any
+        # edit to this file or a rebuilt libtriton rotates the full key.  A True
+        # opt-in additionally changes the options hash.
+        if not hash_dict.get("ph1_m64up_a_vector_store"):
+            hash_dict.pop("ph1_m64up_a_vector_store", None)
+        if not hash_dict.get("ph1_m64up_b_row_shuffle_vector_store"):
+            hash_dict.pop("ph1_m64up_b_row_shuffle_vector_store", None)
         llc_path, lld_path, llc_asm_path = _resolve_toolchain_paths(self)
         hash_dict["effective_llc_path"] = llc_path
         hash_dict["effective_lld_path"] = lld_path
@@ -753,8 +789,14 @@ class MUSABackend(BaseBackend):
 
     @staticmethod
     def make_ttgir(mod, metadata, opt, arch, capability):
+        _set_ph1_b_row_shuffle_marker(mod, opt, arch, capability)
         if opt.maxnreg is not None:
             mod.set_attr("ttg.maxnreg", ir.builder(mod.context).get_int32_attr(opt.maxnreg))
+        if opt.ph1_m64up_a_vector_store:
+            builder = ir.builder(mod.context)
+            mod.set_attr("musa.ph1_m64up_a_vector_store", builder.get_bool_attr(True))
+            mod.set_attr("musa.ph1_m64up_a_vector_store.num_stages",
+                         builder.get_int32_attr(int(opt.num_stages)))
 
         pm = ir.pass_manager(mod.context)
         dump_enabled = pm.enable_debug()

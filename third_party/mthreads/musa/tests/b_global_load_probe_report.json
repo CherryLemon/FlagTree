@@ -1,0 +1,117 @@
+{
+  "probe": "b-global-load-static-probe-v1",
+  "status": "PASS",
+  "scope": "archived M64-up B global-load lowering divergence only",
+  "divergence": {
+    "stage": "post-TTGIR, at LoadOpConversion vector-width selection",
+    "decision_chain": [
+      "LoadStoreOpToLLVM.cpp: LoadOpConversion::matchAndRewrite",
+      "LoadStoreOpToLLVM.cpp: getVectorSize -> axisInfoAnalysis.getContiguity(ptr)",
+      "Analysis/AxisInfo.cpp: ModuleAxisInfoAnalysis::getContiguity -> getAlignment"
+    ],
+    "implicated": "ModuleAxisInfoAnalysis alignment/contiguity value",
+    "exonerated_by_static_evidence": [
+      "front-end TTGIR B load (identical shape/layout/mask/pointer chain)",
+      "LoadOpConversion / getVectorSize structure (unchanged vs initial-36 import)",
+      "blocked layout contigPerThread term (identical old vs current)",
+      "LLVM O3 / backend-opt as a *producer* of scalar form (optimizations combine, not split, load vectors; A stays vector)"
+    ],
+    "not_proven": [
+      "why the current AxisInfo lattice returns <8 for B (no pre-O3 IR, old 3.2 AxisInfo source unavailable locally)",
+      "whether a safe forced-vec8 override exists for all M64-up variants"
+    ]
+  },
+  "facts": {
+    "layouts_identical": true,
+    "b_load_identical_unmasked": true,
+    "b_pointer_chain_identical": true,
+    "current_vector8_global_loads": 2,
+    "current_scalar_bf16_global_loads": 16,
+    "old_vector8_global_loads": 4,
+    "old_scalar_bf16_global_loads": 0,
+    "current_b_scalar_offsets": [
+      [
+        2,
+        4,
+        6,
+        8,
+        10,
+        12,
+        14
+      ],
+      [
+        2,
+        4,
+        6,
+        8,
+        10,
+        12,
+        14
+      ]
+    ],
+    "current_b_base_align_bytes": 16
+  },
+  "checks": [
+    {
+      "name": "blocked_layouts_identical",
+      "passed": true,
+      "detail": "old and current #blocked/#blocked1 definitions match"
+    },
+    {
+      "name": "b_load_present_both",
+      "passed": true,
+      "detail": "B tt.load present in both TTGIR"
+    },
+    {
+      "name": "b_load_unmasked_both",
+      "passed": true,
+      "detail": "B tt.load unmasked in both; shape/layout #blocked1 equal"
+    },
+    {
+      "name": "b_pointer_chain_signature_identical",
+      "passed": true,
+      "detail": "both chains = [('make_range', '0', '64'), ('expand_dims', '1'), ('expand_dims', '0'), ('extsi', None), ('splat', None), ('muli', None), ('extsi', None), ('broadcast', ('64', '1', '64', '32')), ('broadcast', ('1', '32', '64', '32')), ('addi', None), ('splat', None), ('addptr', 'tensor<64x32x!tt.ptr<bf16>, #blocked1>')]"
+    },
+    {
+      "name": "current_A_vector8_B_scalar16",
+      "passed": true,
+      "detail": "current: 2 vector8 (A) + 16 scalar bf16 (B)"
+    },
+    {
+      "name": "old_A_and_B_vector8",
+      "passed": true,
+      "detail": "old: 4 vector8 (A+B) + 0 scalar"
+    },
+    {
+      "name": "current_B_addresses_contiguous_aligned",
+      "passed": true,
+      "detail": "B scalar byte offsets [2, 4, 6, 8, 10, 12, 14]/[2, 4, 6, 8, 10, 12, 14] off base align 16"
+    },
+    {
+      "name": "getVectorSize_unchanged",
+      "passed": true,
+      "detail": "getVectorSize byte-identical to initial-36 import"
+    },
+    {
+      "name": "LoadOpConversion_unchanged_except_opt_in_probe",
+      "passed": true,
+      "detail": "LoadOpConversion byte-identical to initial-36 import after removing the marked default-off diagnostic probe call"
+    },
+    {
+      "name": "decision_chain_present",
+      "passed": true,
+      "detail": "LoadOpConversion vec==1/vec>1 branch + getVectorSize cap present"
+    },
+    {
+      "name": "axisinfo_contiguity_chain_present",
+      "passed": true,
+      "detail": "AxisInfo getContiguity -> getAlignment -> min(align, contig) present"
+    },
+    {
+      "name": "b_shared_layout_changed_out_of_scope",
+      "passed": true,
+      "detail": "old=#ttg.shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0, 1], hasLeadingOffset = true}> cur=#ttg.swizzled_shared<{vec = 16, perPhase = 4, maxPhase = 8, order = [1, 0]}> (documented, not touched)"
+    }
+  ],
+  "live_execution_authorized_by_this_artifact": false
+}

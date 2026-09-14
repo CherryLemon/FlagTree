@@ -1,6 +1,7 @@
 #include "Dialect/MUSA/IR/Dialect.h"
 #include "TritonMUSACommon/MMAContractUtils.h"
 #include "TritonMUSACommon/MemDescUtils.h"
+#include "TritonMUSACommon/PH1M64UpBColVectorStore.h"
 #include "TritonMUSACommon/SqmmaAttrUtils.h"
 #include "TritonMUSAGPUTransforms/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -455,7 +456,8 @@ static SmallVector<int64_t> getSqmmaPaddedAllocShape(RankedTensorType argType,
 static Value getSharedMemorySqmmaOperand(Value v, PatternRewriter &rewriter,
                                          int opIdx,
                                          ttg::MUSASqmmaEncodingAttr mmaEnc,
-                                         bool allowTranspose) {
+                                         bool allowTranspose,
+                                         bool exactBTile = false) {
   OpBuilder::InsertionGuard g(rewriter);
   Value arg = v;
   bool forceFreshRestage = false;
@@ -503,7 +505,21 @@ static Value getSharedMemorySqmmaOperand(Value v, PatternRewriter &rewriter,
     descLoad = descSeed.getDefiningOp<tt::DescriptorLoadOp>();
 
   SmallVector<unsigned> newOrder = ttg::getOrderForMemory(argType);
-  if (!allowTranspose) {
+  // Select the physical order before deriving either producer annotations or
+  // the memdesc. Changing only the composed encoding would leave row_major
+  // inconsistent with the reader's layoutB.
+  auto plainLoad = arg.getDefiningOp<tt::LoadOp>();
+  bool useExactBCol =
+      exactBTile && opIdx == 1 && !allowTranspose && !forceFreshRestage && plainLoad &&
+      !plainLoad.getMask() && !plainLoad.getOther() &&
+      triton::musa::isPH1M64UpBColVectorStoreEnabled(plainLoad) &&
+      triton::musa::isPH1M64UpBColRegisterType(argType) &&
+      mmaEnc.getVersionMajor() == 3 && mmaEnc.getVersionMinor() == 1 &&
+      mmaEnc.getInstrShape() == ArrayRef<unsigned>({32, 32, 64}) &&
+      mmaEnc.getWarpsPerCTA() == ArrayRef<unsigned>({4, 1});
+  if (useExactBCol) {
+    newOrder = {0, 1};
+  } else if (!allowTranspose) {
     newOrder.clear();
     for (int dim = static_cast<int>(rank) - 1; dim >= 0; --dim)
       newOrder.push_back(static_cast<unsigned>(dim));
@@ -524,6 +540,9 @@ static Value getSharedMemorySqmmaOperand(Value v, PatternRewriter &rewriter,
   };
   auto setSqmmaAttrs = [&](Operation *targetOp) {
     triton::musa::setSqmmaAttrs(targetOp, opIdx, elemBytes, isRowMajor);
+    if (useExactBCol)
+      targetOp->setAttr(triton::musa::kPH1M64UpBColVectorStoreSelected,
+                        rewriter.getBoolAttr(true));
   };
   auto setSqmmaAttrsIfCompatible = [&](Operation *targetOp) {
     if (hasConflictingSqmmaAttrs(targetOp))
@@ -886,7 +905,9 @@ public:
     Value newA = getSharedMemorySqmmaOperand(dotOp.getA(), rewriter, 0, mmaEnc,
                                              allowTransposeA);
     Value newB = getSharedMemorySqmmaOperand(dotOp.getB(), rewriter, 1, mmaEnc,
-                                             allowTransposeB);
+                                             allowTransposeB,
+                                             matrixShape->rank == 2 && m == 32 &&
+                                                 n == 32 && k == 64);
     if (!newA || !newB)
       return failure();
 

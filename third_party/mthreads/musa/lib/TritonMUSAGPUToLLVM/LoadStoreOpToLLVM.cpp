@@ -1,5 +1,6 @@
 #include "PatternTritonGPUOpToLLVM.h"
 #include "TritonMUSACommon/MMAOperandUtils.h"
+#include "TritonMUSACommon/PH1WarpShufflePlan.h"
 #include "TritonMUSACommon/SqmmaAttrUtils.h"
 #include "TritonMUSACommon/TMEUtils.h"
 #include "TritonMUSAGPUToLLVM/Utility.h"
@@ -17,8 +18,10 @@
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Tools/LayoutUtils.h"
+#include "llvm/Support/MathExtras.h"
 #include <algorithm>
 #include <functional>
+#include <initializer_list>
 #ifdef __TLE__
 #include <limits>
 #endif // __TLE__
@@ -303,6 +306,482 @@ static FailureOr<Value> getPH1SwizzledSharedElementPtr(
   return ptr;
 }
 
+// Exact-contract, A-only vector grouping for PH1 swizzled shared stores.
+//
+// The generic helper below stores one BF16 element per canonical register. For
+// the audited M64-up SQMMA A operand, the lowest `log2(vec)` register bits are
+// the only producers of the lowest `log2(vec)` bits of the pre-swizzle element
+// offset, and the PH1 swizzle is a permutation at `vec`-element sector
+// granularity. Each aligned run of `vec` registers then maps to one contiguous,
+// `vec * elemBytes`-byte-aligned sector and may be stored as a single
+// `<vec x bfloat>` value.
+//
+// The proof below is derived purely from the tensor/memdesc encodings and the
+// static shared-memory allocation offset. It never inspects the final LLIR and
+// never relies on a compile-key or input hash (neither is available in this
+// lowering). If any check fails the caller keeps the original per-element
+// scalar loop unchanged.
+static bool ph1EqualsIntList(ArrayRef<int64_t> values,
+                             std::initializer_list<int64_t> expected) {
+  return values.size() == expected.size() &&
+         std::equal(values.begin(), values.end(), expected.begin());
+}
+
+static bool ph1EqualsUnsignedList(ArrayRef<unsigned> values,
+                                  std::initializer_list<unsigned> expected) {
+  return values.size() == expected.size() &&
+         std::equal(values.begin(), values.end(), expected.begin());
+}
+
+static bool ph1AllOnes(ArrayRef<unsigned> values) {
+  return !values.empty() &&
+         std::all_of(values.begin(), values.end(),
+                     [](unsigned value) { return value == 1; });
+}
+
+// Explicit opt-in marker, set on the module by the MUSA backend only when the
+// caller selects the audited M64-up/A specialization. No service caller sets
+// it, so this vector store stays disabled unless a future caller opts in with
+// a compile option that participates in the compile cache key.
+inline constexpr llvm::StringLiteral kPH1M64UpAVectorStoreMarker =
+    "musa.ph1_m64up_a_vector_store";
+inline constexpr llvm::StringLiteral kPH1M64UpAVectorStoreNumStages =
+    "musa.ph1_m64up_a_vector_store.num_stages";
+inline constexpr llvm::StringLiteral kPH1M64UpAVectorStoreTarget = "musa:31";
+
+// Returns true iff, for every lane/warp, register run [g*vec, (g+1)*vec) maps
+// to `base + {0..vec-1}` with `base % vec == 0`, where `base` is the
+// pre-swizzle element offset produced by `linearizePH1TMELinearCoords`.
+static bool provePH1ContiguousRegisterVectorGroups(
+    RankedTensorType regTy, ArrayRef<int64_t> physicalShape,
+    ArrayRef<unsigned> order, unsigned elemBytes, unsigned vec) {
+  MLIRContext *ctx = regTy.getContext();
+  if (vec < 2 || !llvm::isPowerOf2_32(vec))
+    return false;
+  if (physicalShape.size() != 2 || order.size() != 2)
+    return false;
+  // The offset formula below assumes the last dim is the leading (fastest)
+  // dim and that a single PH1 leading-dimension group is formed.
+  if (order[0] != 1 || order[1] != 0)
+    return false;
+  auto grouping = triton::musa::getPH1TMELeadingDimGrouping(physicalShape,
+                                                            order, elemBytes);
+  if (failed(grouping) || grouping->numGroups != 1)
+    return false;
+  if (physicalShape[1] <= 0)
+    return false;
+
+  unsigned log2vec = llvm::Log2_32(vec);
+  LinearLayout regLL = toLinearLayout(regTy);
+  auto kReg = str_attr("register");
+  auto kLane = str_attr("lane");
+  auto kWarp = str_attr("warp");
+  const auto &bases = regLL.getBases();
+  if (!bases.contains(kReg) || !bases.contains(kLane) || !bases.contains(kWarp))
+    return false;
+
+  // Exact register count and no replicated/free register bits. The audited A
+  // operand has 16 distinct registers per thread and a zero free mask.
+  unsigned numRegs = regLL.getInDimSize(kReg);
+  if (numRegs != 16)
+    return false;
+  auto freeRegMasks = getFreeVariableMasks(regTy);
+  uint32_t freeRegMask = freeRegMasks.lookup(str_attr("register"));
+  if (freeRegMask != 0)
+    return false;
+
+  // Maps one input basis vector to its contribution to the pre-swizzle element
+  // offset. The contribution must be 0 or a single power of two so that XOR and
+  // integer addition agree on the bits we reason about.
+  auto offsetContribution = [&](ArrayRef<int32_t> basis,
+                                int64_t &offset) -> bool {
+    if (basis.size() != 2)
+      return false;
+    int64_t c0 = basis[0];
+    int64_t c1 = basis[1];
+    if (c0 < 0 || c1 < 0)
+      return false;
+    if (c0 != 0 && c1 != 0)
+      return false;
+    if (c0 != 0 && !llvm::isPowerOf2_64(static_cast<uint64_t>(c0)))
+      return false;
+    if (c1 != 0 && !llvm::isPowerOf2_64(static_cast<uint64_t>(c1)))
+      return false;
+    // linearizePH1TMELinearCoords == dim0 * shape[1] + dim1 for order [1, 0]
+    // with a single leading-dimension group.
+    offset = c0 * physicalShape[1] + c1;
+    return offset == 0 || llvm::isPowerOf2_64(static_cast<uint64_t>(offset));
+  };
+
+  const auto &regBases = bases.find(kReg)->second;
+  if (regBases.size() < log2vec)
+    return false;
+  // The low `log2(vec)` offset bits must come one-for-one from the low
+  // `log2(vec)` register bits, so a register run only changes those bits.
+  for (unsigned i = 0; i < log2vec; ++i) {
+    int64_t offset = 0;
+    if (!offsetContribution(regBases[i], offset))
+      return false;
+    if (offset != static_cast<int64_t>(1u << i))
+      return false;
+  }
+
+  auto introducesLowBits = [&](ArrayRef<int32_t> basis) -> bool {
+    int64_t offset = 0;
+    if (!offsetContribution(basis, offset))
+      return true; // Unmodelable basis: treat as unsafe.
+    if (offset == 0)
+      return false; // Free/broadcast bit: does not touch the low bits.
+    return (offset & (static_cast<int64_t>(vec) - 1)) != 0;
+  };
+  for (unsigned i = log2vec; i < regBases.size(); ++i)
+    if (introducesLowBits(regBases[i]))
+      return false;
+  for (const auto &basis : bases.find(kLane)->second)
+    if (introducesLowBits(basis))
+      return false;
+  for (const auto &basis : bases.find(kWarp)->second)
+    if (introducesLowBits(basis))
+      return false;
+
+  return (numRegs % vec) == 0;
+}
+
+// Returns the number of elements per vector store iff the memdesc/register pair
+// is exactly the audited current M64-up SQMMA A operand and every grouping
+// precondition is statically provable. `std::nullopt` means "keep the scalar
+// loop"; the caller must not emit any store on failure.
+static std::optional<unsigned> matchExactM64UpAOperandVectorContract(
+    MemDescType memDescTy, RankedTensorType regTy, Operation *diagnosticOp,
+    const PH1SwizzledSharedAccess &access) {
+  // A-only: exactly the SQMMA A-operand shared allocation.
+  if (!isa<triton::gpu::LocalAllocOp>(diagnosticOp))
+    return std::nullopt;
+  auto opIdx = triton::musa::getSqmmaOpIdx(diagnosticOp);
+  if (!opIdx || *opIdx != 0)
+    return std::nullopt;
+
+  // Explicit opt-in marker. It is absent for every service caller, so the
+  // vector store is disabled unless a caller selects the audited
+  // specialization with a compile option that is part of the cache key.
+  ModuleOp module = diagnosticOp->getParentOfType<ModuleOp>();
+  if (!module)
+    return std::nullopt;
+  auto marker = module->getAttrOfType<BoolAttr>(kPH1M64UpAVectorStoreMarker);
+  if (!marker || !marker.getValue())
+    return std::nullopt;
+  // Exact target capability 31, CTA/CGA size 1, and one pipeline stage, all
+  // from module IR (the stage count is plumbed by the backend from the same
+  // options object that feeds the compile cache key).
+  auto target = module->getAttrOfType<StringAttr>(triton::gpu::AttrTargetName);
+  if (!target || target.getValue() != kPH1M64UpAVectorStoreTarget)
+    return std::nullopt;
+  auto numCTAs =
+      module->getAttrOfType<IntegerAttr>(triton::gpu::AttrNumCTAsName);
+  if (!numCTAs || numCTAs.getInt() != 1)
+    return std::nullopt;
+  auto numStages =
+      module->getAttrOfType<IntegerAttr>(kPH1M64UpAVectorStoreNumStages);
+  if (!numStages || numStages.getInt() != 1)
+    return std::nullopt;
+  if (!ph1AllOnes(triton::gpu::getCTAsPerCGA(regTy.getEncoding())) ||
+      !ph1AllOnes(triton::gpu::getCTAsPerCGA(memDescTy.getEncoding())))
+    return std::nullopt;
+
+  if (!isa<BFloat16Type>(memDescTy.getElementType()))
+    return std::nullopt;
+  if (memDescTy.getRank() != 2 || regTy.getRank() != 2)
+    return std::nullopt;
+  if (!ph1EqualsIntList(regTy.getShape(), {32, 64}))
+    return std::nullopt;
+  if (!ph1EqualsIntList(access.physicalShape, {32, 64}))
+    return std::nullopt;
+  if (access.hasAffineOffset)
+    return std::nullopt;
+
+  auto blocked = dyn_cast<BlockedEncodingAttr>(regTy.getEncoding());
+  if (!blocked)
+    return std::nullopt;
+  if (!ph1EqualsUnsignedList(blocked.getSizePerThread(), {1u, 8u}) ||
+      !ph1EqualsUnsignedList(blocked.getThreadsPerWarp(), {4u, 8u}) ||
+      !ph1EqualsUnsignedList(blocked.getWarpsPerCTA(), {4u, 1u}) ||
+      !ph1EqualsUnsignedList(triton::gpu::getOrder(regTy), {1u, 0u}))
+    return std::nullopt;
+
+  auto shared = dyn_cast<SwizzledSharedEncodingAttr>(memDescTy.getEncoding());
+  if (!shared)
+    return std::nullopt;
+  if (shared.getVec() != 8 || shared.getPerPhase() != 2 ||
+      shared.getMaxPhase() != 16 ||
+      !ph1EqualsUnsignedList(shared.getOrder(), {1u, 0u}))
+    return std::nullopt;
+
+  auto swizzle = triton::musa::resolveTMESwizzleConfigFromEncoding(memDescTy);
+  if (failed(swizzle))
+    return std::nullopt;
+  unsigned granularityBytes = static_cast<unsigned>(
+      triton::musa::getSwizzleGranularityBytes(swizzle->swizzleGranularity));
+  if (granularityBytes != 16 || access.elemBytes == 0 ||
+      granularityBytes % access.elemBytes != 0)
+    return std::nullopt;
+  unsigned vec = granularityBytes / access.elemBytes;
+  if (vec != 8)
+    return std::nullopt;
+
+  if (!provePH1ContiguousRegisterVectorGroups(
+          regTy, access.physicalShape, access.order, access.elemBytes, vec))
+    return std::nullopt;
+
+  // `smemOffsetBytes` in getPH1SwizzledSharedElementPtr is exactly this
+  // allocation's static offset below the raw shared base. The group base is
+  // `allocation.offset + elemBytes * (multiple of vec)`; requiring the offset
+  // to be granularity-aligned makes every emitted vector sector-aligned.
+  auto allocOffsetAttr =
+      diagnosticOp->getAttrOfType<IntegerAttr>("allocation.offset");
+  if (!allocOffsetAttr)
+    return std::nullopt;
+  if ((allocOffsetAttr.getValue().getZExtValue() % granularityBytes) != 0)
+    return std::nullopt;
+
+  return vec;
+}
+
+// Emits one `<vec x bfloat>` store per proven group. All group addresses are
+// computed before the first store, and no store is emitted if any address
+// cannot be built, so a failure leaves the memory untouched for the scalar
+// fallback.
+static bool emitExactM64UpAOperandVectorStore(
+    Location loc, ConversionPatternRewriter &rewriter,
+    const PH1SwizzledSharedAccess &access, ArrayRef<Value> inVals,
+    ArrayRef<SmallVector<Value>> srcIndices, unsigned vec, Value pred,
+    const mlir::triton::MUSA::TargetInfo &targetInfo) {
+  if (vec == 0 || inVals.size() % vec != 0)
+    return false;
+  unsigned numGroups = inVals.size() / vec;
+  SmallVector<Value, 4> groupBases;
+  groupBases.reserve(numGroups);
+  for (unsigned g = 0; g < numGroups; ++g) {
+    unsigned baseIdx = g * vec;
+    if (baseIdx >= srcIndices.size())
+      return false;
+    auto ptr = getPH1SwizzledSharedElementPtr(loc, rewriter, access,
+                                              srcIndices[baseIdx]);
+    if (failed(ptr))
+      return false;
+    groupBases.push_back(*ptr);
+  }
+  for (unsigned g = 0; g < numGroups; ++g) {
+    Value packed =
+        packLLVector(loc, ArrayRef<Value>(inVals).slice(g * vec, vec),
+                     rewriter);
+    targetInfo.storeDShared(rewriter, loc, groupBases[g], std::nullopt, packed,
+                            pred);
+  }
+  return true;
+}
+
+
+// Exact, default-off B row/SG32 writer. Runtime M64/up identity is attested by
+// the audited caller; this guard independently checks the compiler geometry,
+// actual LinearLayout, physical allocation and complete address coverage.
+static constexpr llvm::StringLiteral kPH1BRowShuffle =
+    "musa.ph1_m64up_b_row_shuffle_vector_store";
+
+static bool provePH1BRowShuffleGroups(
+    RankedTensorType regTy, int64_t allocationOffset,
+    const triton::musa::ResolvedTMESwizzleConfig &swizzle) {
+  auto *ctx = regTy.getContext();
+  LinearLayout layout = toLinearLayout(regTy);
+  auto kReg = str_attr("register");
+  auto kLane = str_attr("lane");
+  auto kWarp = str_attr("warp");
+  auto kBlock = str_attr("block");
+  const auto &bases = layout.getBases();
+  if (layout.getNumInDims() != 4 || layout.getNumOutDims() != 2)
+    return false;
+  for (auto dim : {kReg, kLane, kWarp, kBlock})
+    if (!bases.contains(dim))
+      return false;
+  if (layout.getInDimSize(kReg) != 16 || layout.getInDimSize(kLane) != 32 ||
+      layout.getInDimSize(kWarp) != 4 || layout.getInDimSize(kBlock) != 1)
+    return false;
+  for (auto [dim, mask] : getFreeVariableMasks(regTy))
+    if (mask != 0)
+      return false;
+  // A's unchanged shared contract gives the raw base 4KiB alignment. Requiring
+  // this allocation to share that alignment also covers the SG32 period.
+  if (allocationOffset < 0 || allocationOffset > 0x7ffff000LL ||
+      allocationOffset % 4096 != 0)
+    return false;
+  SmallVector<bool, 2048> seen(2048, false);
+  for (int32_t warp = 0; warp < 4; ++warp) {
+    for (int32_t lane = 0; lane < 32; ++lane) {
+      int64_t groupBase = 0;
+      for (int32_t reg = 0; reg < 16; ++reg) {
+        auto input = layout.apply(
+            {{kReg, reg}, {kLane, lane}, {kWarp, warp}, {kBlock, 0}});
+        if (input.size() != 2 || input[0].first != str_attr("dim0") ||
+            input[1].first != str_attr("dim1") ||
+            input[0].second != 8 * (lane % 8) + reg % 8 ||
+            input[1].second != lane / 8 + 4 * warp + 16 * (reg / 8))
+          return false;
+        // The plan exchanges packed-register bits 0/1 with lane bits 3/4.
+        // Its resulting register j holds N=j, with even/odd K still packed.
+        int64_t k = 8 * (lane % 8) + 2 * (lane / 8) + (reg / 4) % 2;
+        int64_t n = 4 * warp + reg % 4 + 16 * (reg / 8);
+        auto offset = triton::musa::linearizePH1TMELinearCoords(
+            ArrayRef<int64_t>({k, n}), ArrayRef<int64_t>({64, 32}),
+            ArrayRef<unsigned>({1, 0}), 2);
+        if (failed(offset) || *offset != k * 32 + n)
+          return false;
+        int64_t addr = triton::musa::applyPH1TMESwizzleToByteAddress(
+            allocationOffset + 2 * *offset, swizzle.swizzleGranularity,
+            swizzle.swizzleStride, swizzle.swizzleLine);
+        int64_t relative = addr - allocationOffset;
+        if (relative < 0 || relative >= 4096 || relative % 2 != 0 ||
+            seen[relative / 2])
+          return false;
+        seen[relative / 2] = true;
+        if (reg % 4 == 0) {
+          groupBase = addr;
+          if (groupBase % 8 != 0)
+            return false;
+        } else if (addr != groupBase + 2 * (reg % 4)) {
+          return false;
+        }
+      }
+    }
+  }
+  return llvm::all_of(seen, [](bool value) { return value; });
+}
+
+static bool matchPH1BRowShuffleContract(
+    MemDescType memDescTy, RankedTensorType regTy, Operation *op,
+    const PH1SwizzledSharedAccess &access) {
+  if (!isa<triton::gpu::LocalAllocOp>(op))
+    return false;
+  auto module = op->getParentOfType<ModuleOp>();
+  if (!module)
+    return false;
+  auto enabled = module->getAttrOfType<BoolAttr>(kPH1BRowShuffle);
+  if (!enabled || !enabled.getValue())
+    return false;
+  auto matchesInt = [&](StringRef name, int64_t value) {
+    auto attr = module->getAttrOfType<IntegerAttr>(name);
+    return attr && attr.getInt() == value;
+  };
+  auto target = module->getAttrOfType<StringAttr>(triton::gpu::AttrTargetName);
+  auto backendOpt = module->getAttrOfType<BoolAttr>(
+      "musa.ph1_m64up_b_row_shuffle_vector_store.backend_opt");
+  auto aEnabled = module->getAttrOfType<BoolAttr>(kPH1M64UpAVectorStoreMarker);
+  if (!target || target.getValue() != "musa:31" ||
+      !backendOpt || !backendOpt.getValue() || !aEnabled || !aEnabled.getValue() ||
+      !matchesInt(triton::gpu::AttrNumCTAsName, 1) ||
+      !matchesInt(triton::gpu::AttrNumWarpsName, 4) ||
+      !matchesInt(triton::gpu::AttrNumThreadsPerWarp, 32) ||
+      !matchesInt("musa.ph1_m64up_b_row_shuffle_vector_store.num_stages", 1) ||
+      !matchesInt("musa.ph1_m64up_b_row_shuffle_vector_store.warp_size", 32))
+    return false;
+  auto opIdx = triton::musa::getSqmmaOpIdx(op);
+  auto elemBytes = triton::musa::getSqmmaElemBytes(op);
+  auto rowMajor = op->getAttrOfType<BoolAttr>(triton::musa::kSqmmaRowMajorAttr);
+  if (!opIdx || *opIdx != 1 || !elemBytes || *elemBytes != 2 ||
+      !rowMajor || !rowMajor.getValue())
+    return false;
+  if (regTy.getRank() != 2 || !regTy.getElementType().isBF16() ||
+      !ph1EqualsIntList(regTy.getShape(), {64, 32}) ||
+      memDescTy.getRank() != 2 || !memDescTy.getElementType().isBF16() ||
+      !ph1EqualsIntList(memDescTy.getShape(), {64, 32}) ||
+      !ph1EqualsIntList(access.physicalShape, {64, 32}) ||
+      !ph1EqualsUnsignedList(access.order, {1u, 0u}) ||
+      access.elemBytes != 2 || access.hasAffineOffset ||
+      !ph1AllOnes(triton::gpu::getCTAsPerCGA(regTy.getEncoding())) ||
+      !ph1AllOnes(triton::gpu::getCTAsPerCGA(memDescTy.getEncoding())))
+    return false;
+  auto blocked = dyn_cast<BlockedEncodingAttr>(regTy.getEncoding());
+  auto shared = dyn_cast<SwizzledSharedEncodingAttr>(memDescTy.getEncoding());
+  if (!blocked ||
+      !ph1EqualsUnsignedList(blocked.getSizePerThread(), {8u, 1u}) ||
+      !ph1EqualsUnsignedList(blocked.getThreadsPerWarp(), {8u, 4u}) ||
+      !ph1EqualsUnsignedList(blocked.getWarpsPerCTA(), {1u, 4u}) ||
+      !ph1EqualsUnsignedList(blocked.getOrder(), {0u, 1u}) ||
+      !shared || shared.getVec() != 16 || shared.getPerPhase() != 4 ||
+      shared.getMaxPhase() != 8 ||
+      !ph1EqualsUnsignedList(shared.getOrder(), {1u, 0u}))
+    return false;
+  auto swizzle = triton::musa::resolveTMESwizzleConfigFromEncoding(memDescTy);
+  auto grouping = triton::musa::getPH1TMELeadingDimGrouping(
+      access.physicalShape, access.order, access.elemBytes);
+  if (failed(swizzle) || failed(grouping) || grouping->numGroups != 1 ||
+      grouping->elemsPerGroupInLeadingDim != 32 ||
+      triton::musa::getSwizzleGranularityBytes(swizzle->swizzleGranularity) != 32 ||
+      triton::musa::getSwizzleStrideBytes(swizzle->swizzleStride) != 256 ||
+      triton::musa::getSwizzleLineBytes(swizzle->swizzleLine) != 256)
+    return false;
+  auto offset = op->getAttrOfType<IntegerAttr>("allocation.offset");
+  return offset && provePH1BRowShuffleGroups(regTy, offset.getInt(), *swizzle);
+}
+
+static bool emitPH1BRowShuffleVectorStore(
+    Location loc, ConversionPatternRewriter &rewriter,
+    const PH1SwizzledSharedAccess &access, ArrayRef<Value> inVals,
+    ArrayRef<SmallVector<Value>> srcIndices, Value pred,
+    const mlir::triton::MUSA::TargetInfo &targetInfo) {
+  if (inVals.size() != 16 || srcIndices.size() != 16 ||
+      llvm::any_of(inVals, [](Value value) { return !value.getType().isBF16(); }) ||
+      llvm::any_of(srcIndices, [](ArrayRef<Value> coord) { return coord.size() != 2; }))
+    return false;
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  // The guard proves every register/lane/warp is canonical, making the
+  // redundant-thread predicate uniformly true in the supported full-warp
+  // exact-up K loop. There is no lane-dependent branch around the shuffles.
+  Value thread = getThreadId(rewriter, loc);
+  Value lane = b.and_(thread, b.i32_val(31));
+  Value warp = b.lshr(thread, b.i32_val(5));
+  Value k = b.add(b.mul(b.and_(lane, b.i32_val(7)), b.i32_val(8)),
+                  b.mul(b.lshr(lane, b.i32_val(3)), b.i32_val(2)));
+  Value n = b.mul(warp, b.i32_val(4));
+  SmallVector<Value, 4> addresses;
+  for (unsigned group = 0; group < 4; ++group) {
+    SmallVector<Value, 2> coord{
+        b.add(k, b.i32_val(group % 2)),
+        b.add(n, b.i32_val(16 * (group / 2)))};
+    auto ptr = getPH1SwizzledSharedElementPtr(loc, rewriter, access, coord);
+    if (failed(ptr))
+      return false;
+    addresses.push_back(*ptr);
+  }
+  // All failure exits precede any shuffle or store. Bitcasts only: no BF16
+  // arithmetic, widening/narrowing conversion, or NaN canonicalization.
+  std::array<Value, 8> pairs;
+  for (unsigned pair = 0; pair < 8; ++pair)
+    pairs[pair] = b.bitcast(packLLVector(loc, inVals.slice(2 * pair, 2), rewriter),
+                           rewriter.getI32Type());
+  auto result = triton::musa::transposePH1BRowPairs(
+      pairs,
+      [&](unsigned bit) {
+        return b.icmp_eq(b.and_(lane, b.i32_val(bit)), b.i32_val(0));
+      },
+      [&](Value condition, Value low, Value high) {
+        return b.select(condition, low, high);
+      },
+      [&](Value value, unsigned bit) {
+        return targetInfo.shuffleXor(rewriter, loc, value, bit);
+      });
+  auto pairType = VectorType::get({2}, inVals[0].getType());
+  for (unsigned group = 0; group < 4; ++group) {
+    SmallVector<Value, 4> elements;
+    for (unsigned j = 0; j < 4; ++j) {
+      Value pair = b.bitcast(result[4 * (group / 2) + j], pairType);
+      elements.push_back(b.extract_element(pair, b.i32_val(group % 2)));
+    }
+    Value packed = packLLVector(loc, elements, rewriter);
+    targetInfo.storeDShared(rewriter, loc, addresses[group], std::nullopt,
+                           packed, pred);
+  }
+  return true;
+}
+
 static LogicalResult lowerPH1SwizzledSharedStoreFromTensor(
     Location loc, SharedMemoryObject smemObj, MemDescType memDescTy,
     RankedTensorType regTy, Value llvmSrc,
@@ -327,6 +806,16 @@ static LogicalResult lowerPH1SwizzledSharedStoreFromTensor(
   Value threadPred =
       emitRedundantThreadPredicate(freeVarMasks, rewriter, loc, targetInfo);
   Value pred = threadPred ? threadPred : b.true_val();
+  if (auto vec = matchExactM64UpAOperandVectorContract(memDescTy, regTy,
+                                                       diagnosticOp, *access)) {
+    if (emitExactM64UpAOperandVectorStore(loc, rewriter, *access, inVals,
+                                          srcIndices, *vec, pred, targetInfo))
+      return success();
+  }
+  if (matchPH1BRowShuffleContract(memDescTy, regTy, diagnosticOp, *access) &&
+      emitPH1BRowShuffleVectorStore(loc, rewriter, *access, inVals, srcIndices,
+                                   pred, targetInfo))
+    return success();
   for (auto [idx, coord] : llvm::enumerate(srcIndices)) {
     if (!isCanonicalIndex(static_cast<unsigned>(idx), regMask))
       continue;
