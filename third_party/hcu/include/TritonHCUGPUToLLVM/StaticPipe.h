@@ -12,6 +12,7 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/SmallPtrSet.h"
 
 namespace mlir::triton::HCU::static_pipe {
@@ -22,68 +23,119 @@ inline constexpr const char *preparedAttr = "tle.hcu.static_pipe_prepared";
 inline constexpr const char *payloadAttr = "tle.hcu.static_pipe_payload";
 inline constexpr const char *stateAttr = "tle.hcu.static_pipe_state";
 
-inline std::optional<int64_t> constant(Value v) {
-  APInt n;
-  if (matchPattern(v, m_ConstantInt(&n)))
-    return n.getBitWidth() == 1 ? n.getZExtValue() : n.getSExtValue();
-  if (auto cast = v.getDefiningOp<arith::ExtSIOp>())
-    return constant(cast.getIn());
-  if (auto cast = v.getDefiningOp<arith::ExtUIOp>())
-    return constant(cast.getIn());
-  if (auto add = v.getDefiningOp<arith::AddIOp>()) {
-    auto a = constant(add.getLhs()), b = constant(add.getRhs());
-    if (a && b)
-      return *a + *b;
+// Evaluate only the integer expressions admitted by the public stage/phase API.
+// Preserve the IR bit width: a truncation or a wrapping intermediate can change
+// the slot/phase even when unbounded integer algebra gives the expected value.
+// Undefined/poison arithmetic is not a proof, including violated overflow
+// flags.
+inline std::optional<APInt> evaluateInteger(Value v, Value iv, int64_t n,
+                                            unsigned depth = 0) {
+  if (!v || depth > 128)
+    return std::nullopt;
+  unsigned width;
+  if (auto type = dyn_cast<IntegerType>(v.getType()))
+    width = type.getWidth();
+  else if (isa<IndexType>(v.getType()))
+    // The HCU LLVM conversion uses overrideIndexBitwidth(32).
+    width = 32;
+  else
+    return std::nullopt;
+  if (iv && v == iv)
+    return APInt(width, n, /*isSigned=*/true);
+  APInt literal;
+  if (matchPattern(v, m_ConstantInt(&literal)))
+    return literal.sextOrTrunc(width);
+  auto *op = v.getDefiningOp();
+  if (!op || op->getNumResults() != 1)
+    return std::nullopt;
+  auto arithmetic = [&](APInt result, bool signedOverflow,
+                        bool unsignedOverflow) -> std::optional<APInt> {
+    if (auto flags = dyn_cast<arith::ArithIntegerOverflowFlagsInterface>(op))
+      if ((signedOverflow && flags.hasNoSignedWrap()) ||
+          (unsignedOverflow && flags.hasNoUnsignedWrap()))
+        return std::nullopt;
+    return result;
+  };
+  if (isa<arith::ExtSIOp, arith::ExtUIOp, arith::TruncIOp, arith::IndexCastOp,
+          arith::IndexCastUIOp>(op)) {
+    auto a = evaluateInteger(op->getOperand(0), iv, n, depth + 1);
+    if (!a)
+      return std::nullopt;
+    if (isa<arith::TruncIOp>(op)) {
+      auto result = a->trunc(width);
+      return arithmetic(result, result.sext(a->getBitWidth()) != *a,
+                        result.zext(a->getBitWidth()) != *a);
+    }
+    if (isa<arith::ExtUIOp, arith::IndexCastUIOp>(op))
+      return a->zextOrTrunc(width);
+    return a->sextOrTrunc(width);
   }
-  if (auto mul = v.getDefiningOp<arith::MulIOp>()) {
-    auto a = constant(mul.getLhs()), b = constant(mul.getRhs());
-    if (a && b)
-      return *a * *b;
+  if (op->getNumOperands() != 2)
+    return std::nullopt;
+  auto a = evaluateInteger(op->getOperand(0), iv, n, depth + 1);
+  auto b = evaluateInteger(op->getOperand(1), iv, n, depth + 1);
+  if (!a || !b || a->getBitWidth() != b->getBitWidth())
+    return std::nullopt;
+  bool signedOverflow = false, unsignedOverflow = false;
+  if (isa<arith::AddIOp>(op)) {
+    auto result = a->sadd_ov(*b, signedOverflow);
+    (void)a->uadd_ov(*b, unsignedOverflow);
+    return arithmetic(result, signedOverflow, unsignedOverflow);
+  }
+  if (isa<arith::SubIOp>(op)) {
+    auto result = a->ssub_ov(*b, signedOverflow);
+    (void)a->usub_ov(*b, unsignedOverflow);
+    return arithmetic(result, signedOverflow, unsignedOverflow);
+  }
+  if (isa<arith::MulIOp>(op)) {
+    auto result = a->smul_ov(*b, signedOverflow);
+    (void)a->umul_ov(*b, unsignedOverflow);
+    return arithmetic(result, signedOverflow, unsignedOverflow);
+  }
+  if (isa<arith::DivSIOp, arith::RemSIOp>(op)) {
+    // HCU lowers remsi directly to LLVM srem, where MIN_SIGNED % -1 is
+    // undefined as well as the corresponding signed division.
+    if (b->isZero() || (a->isMinSignedValue() && b->isAllOnes()))
+      return std::nullopt;
+    return isa<arith::DivSIOp>(op) ? a->sdiv(*b) : a->srem(*b);
+  }
+  if (isa<arith::DivUIOp, arith::RemUIOp>(op)) {
+    if (b->isZero())
+      return std::nullopt;
+    return isa<arith::DivUIOp>(op) ? a->udiv(*b) : a->urem(*b);
+  }
+  if (isa<arith::AndIOp>(op))
+    return *a & *b;
+  if (isa<arith::ShLIOp, arith::ShRUIOp, arith::ShRSIOp>(op)) {
+    if (b->uge(a->getBitWidth()))
+      return std::nullopt;
+    unsigned shift = b->getZExtValue();
+    if (isa<arith::ShLIOp>(op)) {
+      auto result = a->sshl_ov(shift, signedOverflow);
+      (void)a->ushl_ov(shift, unsignedOverflow);
+      return arithmetic(result, signedOverflow, unsignedOverflow);
+    }
+    return isa<arith::ShRUIOp>(op) ? a->lshr(shift) : a->ashr(shift);
+  }
+  if (auto cmp = dyn_cast<arith::CmpIOp>(op)) {
+    if (cmp.getPredicate() == arith::CmpIPredicate::ne)
+      return APInt(1, *a != *b);
+    if (cmp.getPredicate() == arith::CmpIPredicate::eq)
+      return APInt(1, *a == *b);
   }
   return std::nullopt;
 }
-// Evaluate only the integer expressions admitted by the public stage/phase API.
-// The bounded trip count lets us check every iteration without trusting hints.
+
 inline std::optional<int64_t> evaluate(Value v, Value iv, int64_t n) {
-  if (v == iv)
-    return n;
-  if (auto c = constant(v))
-    return c;
-  auto op = v.getDefiningOp();
-  if (!op || op->getNumResults() != 1)
+  auto result = evaluateInteger(v, iv, n);
+  if (!result || !result->isSignedIntN(64))
     return std::nullopt;
-  if (isa<arith::ExtSIOp, arith::ExtUIOp, arith::TruncIOp, arith::IndexCastOp>(
-          op))
-    return evaluate(op->getOperand(0), iv, n);
-  if (op->getNumOperands() != 2)
-    return std::nullopt;
-  auto a = evaluate(op->getOperand(0), iv, n),
-       b = evaluate(op->getOperand(1), iv, n);
-  if (!a || !b)
-    return std::nullopt;
-  if (isa<arith::AddIOp>(op))
-    return *a + *b;
-  if (isa<arith::MulIOp>(op))
-    return *a * *b;
-  if (isa<arith::SubIOp>(op))
-    return *a - *b;
-  if (isa<arith::DivSIOp, arith::DivUIOp>(op) && *b > 0 && *a >= 0)
-    return *a / *b;
-  if (isa<arith::RemSIOp, arith::RemUIOp>(op) && *b > 0 && *a >= 0)
-    return *a % *b;
-  if (isa<arith::AndIOp>(op))
-    return *a & *b;
-  if (isa<arith::ShLIOp>(op) && *b >= 0 && *b < 31)
-    return *a << *b;
-  if (isa<arith::ShRUIOp, arith::ShRSIOp>(op) && *a >= 0 && *b >= 0 && *b < 31)
-    return *a >> *b;
-  if (auto c = dyn_cast<arith::CmpIOp>(op)) {
-    if (c.getPredicate() == arith::CmpIPredicate::ne)
-      return int64_t(*a != *b);
-    if (c.getPredicate() == arith::CmpIPredicate::eq)
-      return int64_t(*a == *b);
-  }
-  return std::nullopt;
+  return result->getBitWidth() == 1 ? result->getZExtValue()
+                                    : result->getSExtValue();
+}
+
+inline std::optional<int64_t> constant(Value v) {
+  return evaluate(v, Value(), 0);
 }
 inline constexpr const char *countedAttr = "tle.hcu.counted_pipe_verified";
 inline constexpr const char *pairAttr = "tle.hcu.counted_pipe_pair";
