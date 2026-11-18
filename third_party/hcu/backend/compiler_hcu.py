@@ -625,13 +625,13 @@ class HIPBackend(BaseBackend):
         mod.set_attr("tle.hcu.descriptor_mls_arch",
                      builder.get_string_attr(options.arch if direct_copy_enabled else "disabled"))
         mod.set_attr("tle.hcu.descriptor_mls_warps", builder.get_int32_attr(options.num_warps))
-        if os.environ.get("FLAGTREE_HCU_EXPERIMENTAL_SOFTWARE_WS") == "1" and "ttg.warp_specialize" in str(mod):
+        if knobs.hcu.experimental_software_ws and "ttg.warp_specialize" in str(mod):
             if (options.arch != "gfx938" or options.num_warps != 2 or options.warp_size != 64 or options.num_ctas != 1
                     or options.num_stages != 1 or options.wasp_enabled or options.wdra_enabled):
                 raise RuntimeError("software WS requires gfx938 default2 + worker2 wave64, one CTA, no WDRA/WASP")
             mod.set_attr("tle.hcu.software_ws_2x2", builder.get_int32_attr(1))
         if "tle.pipe." in str(mod):
-            if os.environ.get("FLAGTREE_HCU_EXPERIMENTAL_STATIC_PIPE") != "1" or options.static_pipe_status_arg < 0:
+            if not knobs.hcu.experimental_static_pipe or options.static_pipe_status_arg < 0:
                 raise RuntimeError("static HCU pipe requires opt-in and explicit static_pipe_status_arg")
             mod.set_attr("tle.hcu.static_pipe_enabled", builder.get_int32_attr(1))
             mod.set_attr("tle.hcu.static_pipe_status_arg", builder.get_int32_attr(options.static_pipe_status_arg))

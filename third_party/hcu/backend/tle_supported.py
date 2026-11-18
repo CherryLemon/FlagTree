@@ -1,4 +1,4 @@
-import os
+from triton import knobs
 
 TLE_SUPPORTED_PRIMITIVES = [
     ## TLE-Raw
@@ -17,8 +17,8 @@ TLE_SUPPORTED_PRIMITIVES = [
 ]
 
 # The HCU compiler verifies the supported subset before lowering these opt-ins.
-if os.environ.get("FLAGTREE_HCU_EXPERIMENTAL_SOFTWARE_WS") == "1":
+if knobs.hcu.experimental_software_ws:
     TLE_SUPPORTED_PRIMITIVES.append("gpu.warp_specialize")
 
-if os.environ.get("FLAGTREE_HCU_EXPERIMENTAL_STATIC_PIPE") == "1":
+if knobs.hcu.experimental_static_pipe:
     TLE_SUPPORTED_PRIMITIVES.append("pipe")
