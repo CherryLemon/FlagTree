@@ -6,6 +6,7 @@ calls. Graph replay follows captured addresses; in-place input refresh is valid.
 """
 import torch
 import triton
+from ._device import _on_device
 from .kernels import split_mm, finish_split, quant_block128
 
 
@@ -61,6 +62,7 @@ class SmallMBF16GemmPlan:
         self.last_main = None
         self.last_reduce = None
 
+    @_on_device("a")
     def __call__(self, a=None, b=None):
         a = self.a if a is None else a
         b = self.b if b is None else b
@@ -101,6 +103,7 @@ class BlockFP8QuantPlan:
         self.scales = torch.empty((self.rows, self.groups), device=x.device, dtype=torch.float32)
         self.last_kernel = None
 
+    @_on_device("x")
     def __call__(self, x=None):
         x = self.x if x is None else x
         if _signature(x) != self.signature:

@@ -3,6 +3,7 @@
 This path uses the same public compiler, without vendor FA or frozen LLVM.
 The specialized equal-head D128 path remains a separate measured choice.
 """
+from .._device import _on_device
 import torch
 import triton
 import triton.language as tl
@@ -73,6 +74,7 @@ class GenericDenseFlashAttentionPlan:
         self.config = dict(num_warps=4, num_stages=1, matrix_instr_nonkdim=16, hcu_packed_f32='vector',
                            hcu_sched_model='default', mmac_issue_group_size=2, hcu_fold_equivalent_loop_state=True)
 
+    @_on_device("q")
     def core(self):
         q, k, v = self.q, self.k, self.v
         o = self.output

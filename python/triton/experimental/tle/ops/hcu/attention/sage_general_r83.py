@@ -5,6 +5,7 @@ unchanged. Short V statistics are fused; longer sequences finalize once per
 channel and reuse the reciprocal rather than repeating reductions per tile.
 Logical vi is always produced. No vendor FA kernel is called.
 """
+from .._device import _on_device
 import torch
 import triton
 import triton.language as tl
@@ -49,6 +50,7 @@ class RawSagePlan(Base):
         super().__init__(q, k, v, bm=bm, stats_rows=512)
         self.separate_stats = k.shape[1] >= 16384 if separate_stats is None else separate_stats
 
+    @_on_device("q")
     def quantize(self):
         if not self.separate_stats: return super().quantize()
         q, k, v = self.q, self.k, self.v
@@ -67,3 +69,11 @@ class RawSagePlan(Base):
                                                     triton.next_power_of_2(self.parts), **opts)
         v_quant_paired[(triton.cdiv(nk, 128) * 2, self.dp // 64, b * hk)](v, self.vrec, self.vi, self.packed, nk, hk, d,
                                                                           self.dp, **opts)
+
+    @_on_device("q")
+    def pack(self):
+        return super().pack()
+
+    @_on_device("q")
+    def core(self):
+        return super().core()

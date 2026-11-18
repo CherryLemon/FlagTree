@@ -1,5 +1,5 @@
 """Owned FA plans with source compilation and cached public Triton launches."""
-from operator import attrgetter
+from ._launch import _CachedLaunch
 import triton
 import triton.language as tl
 from .panel32_compiled_tail_r22 import panel_fwd, prepare_tail
@@ -37,18 +37,6 @@ def merge_rows(P, O, L, NQ: tl.constexpr, HQ: tl.constexpr, D: tl.constexpr, BD:
     tl.store(O + ((b * NQ + row[:, None]) * HQ + h) * D + d[None, :], acc * inverse[:, None],
              (row[:, None] < NQ) & (d[None, :] < D))
     tl.store(L + bh * NQ + row, (maximum + tl.log2(den)) * .6931471805599453, row < NQ)
-
-
-class _CachedLaunch:
-
-    def __init__(self, p, fn, grid, names, constants, options):
-        self.pointers = attrgetter(*names)
-        self.constants = tuple(constants)
-        self.kernel = fn.warmup(*self.pointers(p), *self.constants, grid=grid, **options)
-        self.runner = self.kernel[grid]
-
-    def __call__(self, p):
-        self.runner(*self.pointers(p), *self.constants)
 
 
 class DenseFlashAttentionPlan:
