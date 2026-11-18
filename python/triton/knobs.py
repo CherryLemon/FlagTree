@@ -630,6 +630,8 @@ class amd_knobs(base_knobs):
 
 # flagtree hcu
 class hcu_knobs(base_knobs):
+    experimental_software_ws: env_bool = env_bool("FLAGTREE_HCU_EXPERIMENTAL_SOFTWARE_WS")
+    experimental_static_pipe: env_bool = env_bool("FLAGTREE_HCU_EXPERIMENTAL_STATIC_PIPE")
     use_buffer_ops: env_bool = env_bool("AMDGCN_USE_BUFFER_OPS", True)
     # Note: This requires use_buffer_ops be true to have any effect
     use_buffer_atomics: env_bool = env_bool("AMDGCN_USE_BUFFER_ATOMICS", True)
