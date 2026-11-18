@@ -1,6 +1,7 @@
 """Two-stage BF16/FP16 top-32 for contiguous row-major GPU scores."""
 import torch
 import triton
+from ._device import _on_device
 import triton.language as tl
 
 
@@ -70,6 +71,7 @@ class TopK32Plan:
         self.indices = torch.empty((self.rows, 32), device=x.device, dtype=torch.int64)
         self.last_local = self.last_merge = None
 
+    @_on_device("x")
     def __call__(self):
         self.last_local = _local[(self.rows, self.tiles)](self.x, self.partial, self.values, self.indices, self.width,
                                                           self.tile, self.tiles, self.tiles == 1, num_warps=self.waves,

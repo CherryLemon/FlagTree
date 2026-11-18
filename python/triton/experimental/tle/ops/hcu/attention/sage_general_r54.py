@@ -6,6 +6,7 @@
 P is quantized once per 128 keys. FP32 recurrence uses FMA(acc, alpha, PV),
 including on alpha==1. Full and masked final tiles retain distinct scale order.
 """
+from .._device import _on_device
 import torch
 import triton
 import triton.language as tl
@@ -199,11 +200,13 @@ class RawSagePlan:
                                                                             self.bd, self.bm, **opts)
         return self.output
 
+    @_on_device("q")
     def full(self):
         self.quantize()
         self.pack()
         return self.core()
 
+    @_on_device("q")
     def full_cast(self):
         self.full()
         self.cast_output.copy_(self.output)

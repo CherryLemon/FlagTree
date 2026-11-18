@@ -1,6 +1,7 @@
 """Matrix-vector product for one row of BF16 or FP16 activations."""
 import torch
 import triton
+from ._device import _on_device
 import triton.language as tl
 
 
@@ -30,6 +31,7 @@ class SingleRowGemmPlan:
         self.output = torch.empty((1, self.n), dtype=a.dtype, device=a.device)
         self.compiled = None
 
+    @_on_device("a")
     def __call__(self):
         self.compiled = gemv[(triton.cdiv(self.n, 2), )](self.a, self.b, self.output, self.n, self.k, 2,
                                                          triton.next_power_of_2(self.k), num_warps=4, num_stages=1)
