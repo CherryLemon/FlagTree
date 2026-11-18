@@ -12,3 +12,13 @@ add_triton_ut(
     TritonHCUGPUTransforms
     TritonHCUGPUDialectToLLVM
 )
+
+if(FLAGTREE_TLE)
+  add_triton_ut(
+    NAME TestHCUStaticPipe
+    SRCS StaticPipeTest.cpp
+    LIBS
+      TritonHCUGPUToLLVM
+      MLIRArithDialect
+  )
+endif()
