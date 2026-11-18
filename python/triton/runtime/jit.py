@@ -420,6 +420,7 @@ def serialize_specialization_data(name, signature, constants, attrs, options, ke
 
 class _SignedZeroSpecializationKey(float):
     """Memo-key-only scalar; bound constexpr arguments retain their originals."""
+
     def __new__(cls, value):
         result = float.__new__(cls, value)
         result._negative = value.hex().startswith("-")

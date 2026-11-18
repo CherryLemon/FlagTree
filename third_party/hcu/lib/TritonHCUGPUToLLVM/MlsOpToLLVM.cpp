@@ -91,7 +91,8 @@ struct MLSMatrixLoadToLocalOpConversion
     auto dstTy = cast<MemDescType>(op.getDest().getType());
     auto sharedLayout = dyn_cast<HCUMlsSharedEncodingAttr>(dstTy.getEncoding());
 #ifdef __TLE__
-    if (op->hasAttr("tle.hcu.direct_copy") || op->hasAttr("tle.hcu.issuer_only_copy")) {
+    if (op->hasAttr("tle.hcu.direct_copy") ||
+        op->hasAttr("tle.hcu.issuer_only_copy")) {
       bool issuerOnly = op->hasAttr("tle.hcu.issuer_only_copy");
       if (issuerOnly && !op->hasAttr("tle.hcu.issuer_own_rows_verified"))
         return op.emitOpError("unproved issuer-only MLS ownership/lifecycle");
@@ -117,8 +118,9 @@ struct MLSMatrixLoadToLocalOpConversion
           loc, adaptor.getDest(), llvmElemTy, rewriter);
       auto warp = rewriter.create<ROCDL::ReadfirstlaneOp>(
           loc, i32_ty, b.udiv(getThreadId(rewriter, loc), b.i32_val(64)));
-      Value row = b.add(b.zext(i64_ty, adaptor.getIndices()[0]),
-                        b.mul(b.zext(i64_ty, warp), b.i64_val(issuerOnly ? 32 : 16)));
+      Value row =
+          b.add(b.zext(i64_ty, adaptor.getIndices()[0]),
+                b.mul(b.zext(i64_ty, warp), b.i64_val(issuerOnly ? 32 : 16)));
       Value offset = b.add(b.mul(row, adaptor.getStrides()[0]),
                            b.zext(i64_ty, adaptor.getIndices()[1]));
       Value src = b.gep(ptr_ty(ctx, 1), bits == 16 ? i16_ty : i8_ty,
@@ -128,14 +130,17 @@ struct MLSMatrixLoadToLocalOpConversion
                                       b.i32_val(0), b.i32_val(0));
       // Match the measured mfmt=0/cache_swizzle=1 non-transpose modes.
       resource = b.insert_element(vec_ty(i32_ty, 4), resource,
-                                   b.i32_val(1 << 16), b.i32_val(3));
-      Value dstOffset = b.mul(warp, b.i32_val((issuerOnly ? 32 : 16) * dstTy.getShape()[1]));
+                                  b.i32_val(1 << 16), b.i32_val(3));
+      Value dstOffset =
+          b.mul(warp, b.i32_val((issuerOnly ? 32 : 16) * dstTy.getShape()[1]));
       Value dst = b.gep(ptr_ty(ctx, 3), bits == 16 ? i16_ty : i8_ty,
                         smemObj.getBase(), dstOffset);
-      StringRef instruction = bits == 16
-          ? ROCDL::hcu_matrix_load_32X16_b16::getOperationName()
-          : (issuerOnly ? ROCDL::hcu_matrix_load_64X32_b8::getOperationName()
-                        : ROCDL::hcu_matrix_load_64X16_b8::getOperationName());
+      StringRef instruction =
+          bits == 16
+              ? ROCDL::hcu_matrix_load_32X16_b16::getOperationName()
+              : (issuerOnly
+                     ? ROCDL::hcu_matrix_load_64X32_b8::getOperationName()
+                     : ROCDL::hcu_matrix_load_64X16_b8::getOperationName());
       generateMatrixLoadLDSOp(loc, rewriter, instruction, resource, dst,
                               /*t=*/false, /*offset=*/0, /*r=*/false);
       rewriter.eraseOp(op);

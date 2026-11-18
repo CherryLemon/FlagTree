@@ -1,7 +1,7 @@
 #include "TritonHCUGPUToLLVM/MembarUtility.h"
 #include "AsyncUtility.h"
-#include "TritonHCUGPUToLLVM/StaticPipe.h"
 #include "Dialect/TritonHCUGPU/IR/Dialect.h"
+#include "TritonHCUGPUToLLVM/StaticPipe.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 
 namespace mlir::triton::HCU {
@@ -40,7 +40,8 @@ bool filterLDSMemoryBarriersDependencies(Operation *op1, Operation *op2) {
 } // namespace
 
 bool membarFilter(Operation *op1, Operation *op2) {
-  return (static_pipe::synchronizedPair(op1,op2) || isVerifiedIssuerOnlyPair(op1, op2) ||
+  return (static_pipe::synchronizedPair(op1, op2) ||
+          isVerifiedIssuerOnlyPair(op1, op2) ||
           filterAsyncLocalLoadsDependencies(op1, op2) ||
           filterLDSMemoryBarriersDependencies(op1, op2));
 }

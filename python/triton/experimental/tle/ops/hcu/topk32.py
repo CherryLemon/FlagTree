@@ -15,8 +15,7 @@ def _key(value, index, valid):
 
 
 @triton.jit
-def _local(X, PART, VALUES, INDICES, N: tl.constexpr, TILE: tl.constexpr,
-           TILES: tl.constexpr, DIRECT: tl.constexpr):
+def _local(X, PART, VALUES, INDICES, N: tl.constexpr, TILE: tl.constexpr, TILES: tl.constexpr, DIRECT: tl.constexpr):
     row, tile = tl.program_id(0), tl.program_id(1)
     column = tile * TILE + tl.arange(0, TILE)
     v = tl.load(X + row * N + column, column < N, 0)
@@ -32,8 +31,7 @@ def _local(X, PART, VALUES, INDICES, N: tl.constexpr, TILE: tl.constexpr,
 
 
 @triton.jit
-def _merge(X, PART, VALUES, INDICES, N: tl.constexpr, LENGTH: tl.constexpr,
-           MERGE: tl.constexpr):
+def _merge(X, PART, VALUES, INDICES, N: tl.constexpr, LENGTH: tl.constexpr, MERGE: tl.constexpr):
     row = tl.program_id(0)
     i = tl.arange(0, MERGE)
     ranked = tl.topk(tl.load(PART + row * LENGTH + i, i < LENGTH, 0), 32)
@@ -50,6 +48,7 @@ class TopK32Plan:
     NaNs rank first and keep their input bit patterns. Each call overwrites the
     owned output and scratch. Use separate plans for concurrent execution.
     """
+
     def __init__(self, x, *, tile=None, waves=None):
         if (x.ndim != 2 or x.device.type != "cuda" or not x.is_contiguous()
                 or x.dtype not in (torch.float16, torch.bfloat16)):
@@ -72,12 +71,11 @@ class TopK32Plan:
         self.last_local = self.last_merge = None
 
     def __call__(self):
-        self.last_local = _local[(self.rows, self.tiles)](
-            self.x, self.partial, self.values, self.indices, self.width,
-            self.tile, self.tiles, self.tiles == 1, num_warps=self.waves, num_stages=1)
+        self.last_local = _local[(self.rows, self.tiles)](self.x, self.partial, self.values, self.indices, self.width,
+                                                          self.tile, self.tiles, self.tiles == 1, num_warps=self.waves,
+                                                          num_stages=1)
         if self.tiles > 1:
             size = self.tiles * 32
-            self.last_merge = _merge[(self.rows,)](
-                self.x, self.partial, self.values, self.indices, self.width, size,
-                triton.next_power_of_2(size), num_warps=4, num_stages=1)
+            self.last_merge = _merge[(self.rows, )](self.x, self.partial, self.values, self.indices, self.width, size,
+                                                    triton.next_power_of_2(size), num_warps=4, num_stages=1)
         return self.values, self.indices

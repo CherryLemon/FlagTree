@@ -616,8 +616,7 @@ class TritonSemantic(Generic[TensorTy]):
             raise ValueError("dtype must be specified when value is not a tensor")
         # The null-value fast path erases the sign of floating-point -0.0.
         # Standard floating types have literal builders that preserve that sign.
-        negative_zero = (value == 0 and dtype.is_standard_floating()
-                         and math.copysign(1.0, value) < 0)
+        negative_zero = (value == 0 and dtype.is_standard_floating() and math.copysign(1.0, value) < 0)
         if value == 0 and not negative_zero:
             value = self.builder.get_null_value(dtype.to_ir(self.builder))
         else:

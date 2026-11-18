@@ -48,8 +48,8 @@ struct TleEncodingInfo {
 // inferring an arbitrary parent layout backward can conflict with a valid,
 // explicitly specified input and cause an avoidable shared-memory transpose.
 static bool tleEncodingsMayVary(Operation *op) {
-  return isa<triton::ReduceOp, triton::JoinOp, triton::SplitOp, triton::ReshapeOp, triton::CatOp,
-             triton::TransOp>(op);
+  return isa<triton::ReduceOp, triton::JoinOp, triton::SplitOp,
+             triton::ReshapeOp, triton::CatOp, triton::TransOp>(op);
 }
 
 static LogicalResult mergeTleEncodingInfo(TleEncodingInfo oldInfo,
@@ -129,12 +129,14 @@ static LogicalResult propagateTleEncodingHints(FuncOp func) {
         op->getResult(0).use_empty() || op->getResult(0).hasOneUse())
       return;
     if (auto constant = dyn_cast<arith::ConstantOp>(op))
-      if (!isa<DenseElementsAttr>(constant.getValue())) return;
+      if (!isa<DenseElementsAttr>(constant.getValue()))
+        return;
     sharedGenerators.push_back(op);
   });
   for (Operation *op : sharedGenerators) {
     SmallVector<OpOperand *> uses;
-    for (OpOperand &use : op->getResult(0).getUses()) uses.push_back(&use);
+    for (OpOperand &use : op->getResult(0).getUses())
+      uses.push_back(&use);
     OpBuilder builder(op);
     for (OpOperand *use : llvm::drop_begin(uses)) {
       Operation *copy = builder.clone(*op);
@@ -216,9 +218,8 @@ static LogicalResult propagateTleEncodingHints(FuncOp func) {
       // Inferring a SliceEncoding here constructs an illegal rank-zero slice
       // with a rank-one parent before updateTleEncoding can discard it.
       if (isa<triton::ReduceOp>(op) &&
-          llvm::none_of(op->getResultTypes(), [](Type type) {
-            return isa<RankedTensorType>(type);
-          }))
+          llvm::none_of(op->getResultTypes(),
+                        [](Type type) { return isa<RankedTensorType>(type); }))
         continue;
       Attribute dstEncoding = inferDstEncoding(op, info.encoding);
       if (!dstEncoding)
@@ -307,7 +308,8 @@ static LogicalResult propagateTleEncodingHints(FuncOp func) {
   // Keep the inferred native result and materialize the requested boundary.
   // This runs only for functions containing TLE layout hints.
   func.walk([&](Operation *reduce) {
-    if (!isa<triton::ReduceOp, triton::ReshapeOp, triton::TransOp, triton::SplitOp>(reduce))
+    if (!isa<triton::ReduceOp, triton::ReshapeOp, triton::TransOp,
+             triton::SplitOp>(reduce))
       return;
     auto inputTy = dyn_cast<RankedTensorType>(reduce->getOperand(0).getType());
     if (!inputTy || !inputTy.getEncoding())
@@ -330,7 +332,8 @@ static LogicalResult propagateTleEncodingHints(FuncOp func) {
         continue; // Unhinted split siblings simply keep their native layout.
       auto converted = builder.create<triton::gpu::ConvertLayoutOp>(
           reduce->getLoc(), wantedTy, result);
-      result.replaceAllUsesExcept(converted.getResult(), converted.getOperation());
+      result.replaceAllUsesExcept(converted.getResult(),
+                                  converted.getOperation());
       setTleExplicitResultEncoding(converted.getOperation(), 0, wantedEncoding);
     }
   });
@@ -348,12 +351,14 @@ static LogicalResult propagateTleEncodingHints(FuncOp func) {
     for (OpOperand &use : op->getOpOperands()) {
       Value value = use.get();
       auto type = dyn_cast<RankedTensorType>(value.getType());
-      if (!type || !type.getEncoding() || type.getShape() != result.getShape() ||
+      if (!type || !type.getEncoding() ||
+          type.getShape() != result.getShape() ||
           type.getEncoding() == result.getEncoding())
         continue;
       auto converted = builder.create<ConvertLayoutOp>(
           op->getLoc(), type.cloneWithEncoding(result.getEncoding()), value);
-      setTleExplicitResultEncoding(converted.getOperation(), 0, result.getEncoding());
+      setTleExplicitResultEncoding(converted.getOperation(), 0,
+                                   result.getEncoding());
       use.set(converted.getResult());
     }
   });
@@ -379,8 +384,8 @@ static LogicalResult propagateTleEncodingHints(FuncOp func) {
         continue;
       auto wantedTy = valueTy.cloneWithEncoding(ptrTy.getEncoding());
       OpBuilder builder(store);
-      auto copy = builder.create<arith::ConstantOp>(
-          store.getLoc(), wantedTy, elements.reshape(wantedTy));
+      auto copy = builder.create<arith::ConstantOp>(store.getLoc(), wantedTy,
+                                                    elements.reshape(wantedTy));
       use.set(copy.getResult());
       setTleExplicitResultEncoding(copy.getOperation(), 0, ptrTy.getEncoding());
     }
@@ -436,7 +441,8 @@ template <class Op> struct GenericOpPattern : public OpConversionPattern<Op> {
             if (!type || type.getEncoding() == encoding)
               continue;
             if (type.getShape() != result.getShape())
-              return rewriter.notifyMatchFailure(op, "elementwise tensor shape mismatch");
+              return rewriter.notifyMatchFailure(
+                  op, "elementwise tensor shape mismatch");
             auto converted = ConvertLayoutOp::create(
                 rewriter, op.getLoc(), type.cloneWithEncoding(encoding), value);
             setTleExplicitResultEncoding(converted.getOperation(), 0, encoding);
@@ -754,8 +760,8 @@ struct TritonDotPattern : public OpConversionPattern<triton::DotOp> {
     c = triton::gpu::ConvertLayoutOp::create(rewriter, c.getLoc(), retType, c);
 
     auto dot = triton::DotOp::create(rewriter, op.getLoc(), retType, a, b, c,
-                                   adaptor.getInputPrecision(),
-                                   adaptor.getMaxNumImpreciseAcc());
+                                     adaptor.getInputPrecision(),
+                                     adaptor.getMaxNumImpreciseAcc());
     addNamedAttrs(dot, adaptor.getAttributes());
     Value result = dot.getResult();
 #ifdef __TLE__
@@ -845,7 +851,8 @@ struct TritonSplitOpPattern : public OpConversionPattern<triton::SplitOp> {
     auto srcTy = cast<RankedTensorType>(src.getType());
     auto srcEnc = dyn_cast<BlockedEncodingAttr>(srcTy.getEncoding());
 #ifdef __TLE__
-    int rank = srcTy.getRank(); // A valid inferred linear layout need not be blocked.
+    int rank =
+        srcTy.getRank(); // A valid inferred linear layout need not be blocked.
 #else
     int rank = srcEnc.getOrder().size();
 #endif
@@ -1434,23 +1441,26 @@ public:
 void populateTleRawPatterns(TritonGPUTypeConverter &typeConverter,
                             RewritePatternSet &patterns) {
   MLIRContext *context = patterns.getContext();
-  patterns.add<
-      GenericOpPattern<triton::MatrixLoadOp>,
-      TleDSLRegionOpPattern, TleExtractTileOpPattern, TleInsertTileOpPattern,
-      TleSetLayoutOpPattern, GenericOpPattern<tle::PipeCreateOp>, GenericOpPattern<tle::PipeWriterAcquireOp>,
-      GenericOpPattern<tle::PipeWriterCommitOp>, GenericOpPattern<tle::PipeReaderWaitOp>,
-      GenericOpPattern<tle::PipeReaderReleaseOp>, GenericOpPattern<tle::LocalPointersOp>,
-      GenericOpPattern<tle::RemotePointersOp>,
-      GenericOpPattern<tle::ExclusiveCumsumOp>,
-      GenericOpPattern<tle::DistributedBarrierOp>,
-      GenericOpPattern<tle::YieldOp>,
-      GenericOpPattern<tle::ExtractAllocatedPtrOp>,
-      GenericOpPattern<tle::ExtractAlignedPtrOp>,
-      GenericOpPattern<tle::ExtractOffsetOp>,
-      GenericOpPattern<tle::ExtractSizesOp>,
-      GenericOpPattern<tle::ExtractStridesOp>,
-      GenericOpPattern<tle::ExtractPtrOp>, GenericOpPattern<tle::PackOp>>(
-      typeConverter, context);
+  patterns
+      .add<GenericOpPattern<triton::MatrixLoadOp>, TleDSLRegionOpPattern,
+           TleExtractTileOpPattern, TleInsertTileOpPattern,
+           TleSetLayoutOpPattern, GenericOpPattern<tle::PipeCreateOp>,
+           GenericOpPattern<tle::PipeWriterAcquireOp>,
+           GenericOpPattern<tle::PipeWriterCommitOp>,
+           GenericOpPattern<tle::PipeReaderWaitOp>,
+           GenericOpPattern<tle::PipeReaderReleaseOp>,
+           GenericOpPattern<tle::LocalPointersOp>,
+           GenericOpPattern<tle::RemotePointersOp>,
+           GenericOpPattern<tle::ExclusiveCumsumOp>,
+           GenericOpPattern<tle::DistributedBarrierOp>,
+           GenericOpPattern<tle::YieldOp>,
+           GenericOpPattern<tle::ExtractAllocatedPtrOp>,
+           GenericOpPattern<tle::ExtractAlignedPtrOp>,
+           GenericOpPattern<tle::ExtractOffsetOp>,
+           GenericOpPattern<tle::ExtractSizesOp>,
+           GenericOpPattern<tle::ExtractStridesOp>,
+           GenericOpPattern<tle::ExtractPtrOp>, GenericOpPattern<tle::PackOp>>(
+          typeConverter, context);
 }
 #endif
 

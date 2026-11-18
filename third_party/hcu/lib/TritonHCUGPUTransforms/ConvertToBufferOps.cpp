@@ -17,8 +17,8 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
-#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 #undef DEBUG_TYPE
@@ -668,8 +668,9 @@ private:
     if (!mayHaveDot)
       return false;
     auto module = func->template getParentOfType<ModuleOp>();
-    auto arch = module ? module->template getAttrOfType<StringAttr>("hcu.codegen_arch")
-                       : StringAttr();
+    auto arch =
+        module ? module->template getAttrOfType<StringAttr>("hcu.codegen_arch")
+               : StringAttr();
     if (!arch || arch.getValue() != "gfx938")
       return true;
 

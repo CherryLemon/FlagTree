@@ -32,7 +32,6 @@ def is_in_thread_transpose_enabled(arch):
 
 _AMDGCN_TARGET_RE = re.compile(r'\.amdgcn_target\s+"amdgcn-amd-amdhsa-[^-"]*-(gfx[0-9a-z]+(?::[a-z0-9]+[+-])*)"')
 
-
 _GEMM_DOT_INPUT = re.compile(r"^tensor<[0-9]+x[0-9]+x(f16|bf16|f8E4M3FN), ")
 _GEMM_DOT_ACC = re.compile(r"^tensor<[0-9]+x[0-9]+xf32, ")
 _SYNC_GEMM_OPS = frozenset("""
@@ -59,8 +58,9 @@ def _is_sync_buffer_gemm(mod):
     mod.walk(collect)
     if operations.keys() - _SYNC_GEMM_OPS:
         return False
-    if not all(operations.get(name) for name in (
-            "scf.for", "tt.dot", "ttg.local_alloc", "ttg.local_load", "hcug.buffer_load")):
+    if not all(
+            operations.get(name)
+            for name in ("scf.for", "tt.dot", "ttg.local_alloc", "ttg.local_load", "hcug.buffer_load")):
         return False
     funcs = operations.get("tt.func", [])
     stores = operations.get("hcug.buffer_store", [])
@@ -92,10 +92,8 @@ def _is_gemm_matrix_lds_candidate(mod):
             dots.append(op)
 
     mod.walk(collect)
-    if (names.count("tt.func") != 1 or len(dots) != 1
-            or names.count("tt.store") != 1 or "scf.for" not in names
-            or any(name not in _SYNC_GEMM_OPS and name not in
-                   {"tt.load", "tt.store", "tt.addptr", "tt.bitcast"}
+    if (names.count("tt.func") != 1 or len(dots) != 1 or names.count("tt.store") != 1 or "scf.for" not in names
+            or any(name not in _SYNC_GEMM_OPS and name not in {"tt.load", "tt.store", "tt.addptr", "tt.bitcast"}
                    for name in names)):
         return False
 
@@ -219,33 +217,39 @@ class HIPOptions:
     def __post_init__(self):
         if self.hcu_gemm_barrier_policy not in ("auto", "legacy"):
             raise ValueError("hcu_gemm_barrier_policy must be auto or legacy")
-        if self.hcu_panel_war_after_mma not in (0,8,16,24):
+        if self.hcu_panel_war_after_mma not in (0, 8, 16, 24):
             raise ValueError('deferred WAR supports0/8/16/24MMAC;16/24require proved32MMA-eight-DS panel')
-        if self.hcu_panel_war_after_mma and (not self.hcu_panel_pipeline or not self.hcu_panel_native_war or self.hcu_panel_stream_v):
+        if self.hcu_panel_war_after_mma and (not self.hcu_panel_pipeline or not self.hcu_panel_native_war
+                                             or self.hcu_panel_stream_v):
             raise ValueError('deferred WAR requires panel/native WAR/no V streaming')
 
-        if self.hcu_mmac_priority not in ('none','control','high','yield'):
+        if self.hcu_mmac_priority not in ('none', 'control', 'high', 'yield'):
             raise ValueError('hcu_mmac_priority must be none/control/high/yield')
-        if self.hcu_mmac_priority != 'none' and (self.arch!='gfx938' or self.num_warps!=4 or self.wasp_enabled or self.wdra_enabled):
+        if self.hcu_mmac_priority != 'none' and (self.arch != 'gfx938' or self.num_warps != 4 or self.wasp_enabled
+                                                 or self.wdra_enabled):
             raise ValueError('MMAC priority requires gfx938/four waves/no WS or WDRA')
 
-        if self.hcu_compact_rsrc not in ('auto','none','bfm'):
+        if self.hcu_compact_rsrc not in ('auto', 'none', 'bfm'):
             raise ValueError('hcu_compact_rsrc must be auto, none or bfm')
         if self.hcu_compact_rsrc == 'bfm' and self.arch != 'gfx938':
             raise ValueError('compact scalar resource materialization requires gfx938')
-        if self.mmac_issue_group_size not in (1,2):
+        if self.mmac_issue_group_size not in (1, 2):
             raise ValueError('mmac_issue_group_size must be 1 or 2')
         if self.mmac_issue_group_size != 1 and self.arch != 'gfx938':
             raise ValueError('MMAC grouping currently requires gfx938')
-        if self.hcu_packed_f32 not in ('auto','none','add','fma','all','vector','cvt'):
+        if self.hcu_packed_f32 not in ('auto', 'none', 'add', 'fma', 'all', 'vector', 'cvt'):
             raise ValueError('hcu_packed_f32 must be auto, none, add, fma, all, vector or cvt')
-        if self.hcu_packed_f32 not in ('none','auto') and self.arch != 'gfx938':
+        if self.hcu_packed_f32 not in ('none', 'auto') and self.arch != 'gfx938':
             raise ValueError('packed FP32 lowering currently requires gfx938')
-        if self.hcu_descriptor_mls_load and (self.arch != 'gfx938' or self.num_warps != 4 or self.num_stages != 1 or self.num_ctas != 1 or self.wasp_enabled or self.wdra_enabled):
+        if self.hcu_descriptor_mls_load and (self.arch != 'gfx938' or self.num_warps != 4 or self.num_stages != 1
+                                             or self.num_ctas != 1 or self.wasp_enabled or self.wdra_enabled):
             raise ValueError('descriptor MLS load requires gfx938, four waves, one stage/CTA, no WS/WDRA')
-        if (self.hcu_panel_native_war or self.hcu_panel_stream_v or self.hcu_identity_rescale or self.hcu_panel_cross_iteration or self.hcu_panel_compact_k or self.hcu_panel_unroll2) and not self.hcu_panel_pipeline:
+        if (self.hcu_panel_native_war or self.hcu_panel_stream_v or self.hcu_identity_rescale
+                or self.hcu_panel_cross_iteration or self.hcu_panel_compact_k
+                or self.hcu_panel_unroll2) and not self.hcu_panel_pipeline:
             raise ValueError("panel streaming/rescale requires panel pipeline")
-        if self.hcu_panel_pipeline and (self.arch != 'gfx938' or self.num_warps != 4 or self.num_stages != 1 or self.num_ctas != 1 or self.wasp_enabled or self.wdra_enabled):
+        if self.hcu_panel_pipeline and (self.arch != 'gfx938' or self.num_warps != 4 or self.num_stages != 1
+                                        or self.num_ctas != 1 or self.wasp_enabled or self.wdra_enabled):
             raise ValueError('panel pipeline requires gfx938, four waves, one stage/CTA, no WS/WDRA')
         if self.hcu_sched_model not in ("default", "gfx938-v2"):
             raise ValueError("hcu_sched_model must be default or gfx938-v2")
@@ -279,31 +283,32 @@ class HIPOptions:
         return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
-
 def prepare_legacy_dtk_ir(kernel_ir):
     """Conservative LLVM22 text compatibility for the pinned DTK17/18 readers."""
     errno_none = 0
+
     def attribute_group(group):
         nonlocal errno_none
+
         def effects(match):
             nonlocal errno_none
-            if match.group(1) is None:return match.group(0)
+            if match.group(1) is None: return match.group(0)
             parts = [part.strip() for part in match.group(1).split(',')]
             errno = [part for part in parts if part.startswith('errnomem:')]
             if any(part != 'errnomem: none' for part in errno):
                 raise RuntimeError('unverified non-none errnomem effect for legacy DTK')
-            if not errno:return match.group(0)
+            if not errno: return match.group(0)
             errno_none += 1
             kept = [part for part in parts if part != 'errnomem: none']
             return 'memory(' + ', '.join(kept) + ')' if kept else ''
+
         return re.sub(r'"(?:\\.|[^"\\])*"|\bmemory\(([^)]*)\)', effects, group.group(0))
+
     # Only canonical LLVM function-attribute groups, never string constants.
-    kernel_ir = re.sub(r'^attributes #[0-9]+ = \{[^\n]*\}$', attribute_group,
-                       kernel_ir, flags=re.MULTILINE)
+    kernel_ir = re.sub(r'^attributes #[0-9]+ = \{[^\n]*\}$', attribute_group, kernel_ir, flags=re.MULTILINE)
     lifetime_prefix = r'^[ \t]*(?:(?:(?:tail|musttail|notail) )?call\b|declare\b)'
     lifetime_name = r'[^\n]*@llvm\.lifetime\.(?:start|end)\.p[0-9]+'
-    kernel_ir, lifetimes = re.subn(lifetime_prefix + lifetime_name + r'\([^\n]*\n',
-                                  '', kernel_ir, flags=re.MULTILINE)
+    kernel_ir, lifetimes = re.subn(lifetime_prefix + lifetime_name + r'\([^\n]*\n', '', kernel_ir, flags=re.MULTILINE)
     if re.search(lifetime_prefix + lifetime_name, kernel_ir, flags=re.MULTILINE):
         raise RuntimeError('unhandled LLVM22 lifetime intrinsic syntax')
     return kernel_ir, errno_none, lifetimes
@@ -553,7 +558,7 @@ class HIPBackend(BaseBackend):
         # Propagate the existing fusion contract into DTK's final codegen.
         if options.arch == 'gfx938' and clang_major == '18' and options.enable_fp_fusion:
             options_args.append('-mllvm=-fp-fuse=fast')
-        if options.hcu_packed_f32 not in ('none','auto') and clang_major != '18':
+        if options.hcu_packed_f32 not in ('none', 'auto') and clang_major != '18':
             raise RuntimeError('packed FP32 intrinsics require the validated AICC18 ABI')
         if options.hcu_compact_rsrc == 'bfm' and clang_major != '18':
             raise RuntimeError('compact resource lowering requires validated AICC18')
@@ -603,33 +608,36 @@ class HIPBackend(BaseBackend):
         builder = ir.builder(mod.context)
         mod.set_attr("hcu.codegen_arch", builder.get_string_attr(options.arch))
         compact = 0
-        if options.arch == 'gfx938' and options.hcu_compact_rsrc != 'none' and HIPBackend._auto_pairing_aicc18(str(HIPBackend.path_to_rocm_clang())):
+        if options.arch == 'gfx938' and options.hcu_compact_rsrc != 'none' and HIPBackend._auto_pairing_aicc18(
+                str(HIPBackend.path_to_rocm_clang())):
             compact = 2 if options.hcu_compact_rsrc == 'auto' else 1
         mod.set_attr("hcu.compact_rsrc", builder.get_int32_attr(compact))
         # 32 is an auto-policy request, resolved structurally before LLVM lowering.
         # Explicit none remains a complete opt-out; other architectures/DTK stay unchanged.
-        packed = {'none':0, 'add':1, 'fma':2, 'all':3, 'vector':4, 'cvt':8}.get(options.hcu_packed_f32, 0)
-        if options.hcu_packed_f32 == 'auto' and options.arch == 'gfx938' and HIPBackend._auto_pairing_aicc18(str(HIPBackend.path_to_rocm_clang())):
+        packed = {'none': 0, 'add': 1, 'fma': 2, 'all': 3, 'vector': 4, 'cvt': 8}.get(options.hcu_packed_f32, 0)
+        if options.hcu_packed_f32 == 'auto' and options.arch == 'gfx938' and HIPBackend._auto_pairing_aicc18(
+                str(HIPBackend.path_to_rocm_clang())):
             packed = 32
         mod.set_attr("hcu.packed_f32", builder.get_int32_attr(packed))
         mod.set_attr("hcu.descriptor_mls_load", builder.get_int32_attr(int(options.hcu_descriptor_mls_load)))
-        direct_copy_enabled = (options.num_stages == 1 and options.warp_size == 64
-                               and options.num_ctas == 1 and not options.wasp_enabled)
+        direct_copy_enabled = (options.num_stages == 1 and options.warp_size == 64 and options.num_ctas == 1
+                               and not options.wasp_enabled)
         mod.set_attr("tle.hcu.descriptor_mls_arch",
                      builder.get_string_attr(options.arch if direct_copy_enabled else "disabled"))
         mod.set_attr("tle.hcu.descriptor_mls_warps", builder.get_int32_attr(options.num_warps))
         if os.environ.get("FLAGTREE_HCU_EXPERIMENTAL_SOFTWARE_WS") == "1" and "ttg.warp_specialize" in str(mod):
-            if (options.arch != "gfx938" or options.num_warps != 2 or options.warp_size != 64
-                    or options.num_ctas != 1 or options.num_stages != 1 or options.wasp_enabled or options.wdra_enabled):
+            if (options.arch != "gfx938" or options.num_warps != 2 or options.warp_size != 64 or options.num_ctas != 1
+                    or options.num_stages != 1 or options.wasp_enabled or options.wdra_enabled):
                 raise RuntimeError("software WS requires gfx938 default2 + worker2 wave64, one CTA, no WDRA/WASP")
             mod.set_attr("tle.hcu.software_ws_2x2", builder.get_int32_attr(1))
         if "tle.pipe." in str(mod):
             if os.environ.get("FLAGTREE_HCU_EXPERIMENTAL_STATIC_PIPE") != "1" or options.static_pipe_status_arg < 0:
                 raise RuntimeError("static HCU pipe requires opt-in and explicit static_pipe_status_arg")
-            mod.set_attr("tle.hcu.static_pipe_enabled",builder.get_int32_attr(1))
-            mod.set_attr("tle.hcu.static_pipe_status_arg",builder.get_int32_attr(options.static_pipe_status_arg))
-            mod.set_attr("tle.hcu.static_pipe_test_drop_ready",builder.get_int32_attr(int(options.static_pipe_test_drop_ready)))
-            mod.set_attr("tle.hcu.allow_counted_pipe",builder.get_int32_attr(int(options.static_pipe_counted_loop)))
+            mod.set_attr("tle.hcu.static_pipe_enabled", builder.get_int32_attr(1))
+            mod.set_attr("tle.hcu.static_pipe_status_arg", builder.get_int32_attr(options.static_pipe_status_arg))
+            mod.set_attr("tle.hcu.static_pipe_test_drop_ready",
+                         builder.get_int32_attr(int(options.static_pipe_test_drop_ready)))
+            mod.set_attr("tle.hcu.allow_counted_pipe", builder.get_int32_attr(int(options.static_pipe_counted_loop)))
             passes.common.add_symbol_dce(pm)
         passes.ttir.add_rewrite_tensor_descriptor_to_pointer(pm)
         passes.common.add_canonicalizer(pm)
@@ -660,13 +668,11 @@ class HIPBackend(BaseBackend):
         # distributed.passes.ttir.add_convert_to_ttgpuir_ext(pm, f"hip:{options.arch}", options.num_warps,
         #                                                    options.warp_size, options.num_ctas)
         pm.run(mod, 'make_ttgir_early')
-        if (options.hcu_gemm_matrix_lds and options.arch == "gfx938"
-                and options.num_ctas == 1 and options.num_warps == 4
-                and options.num_stages in (1, 2) and options.kpack == 1
-                and not (options.wasp_enabled or options.wdra_enabled
-                         or options.hcu_panel_pipeline or options.hcu_descriptor_mls_load
-                         or knobs.hcu.use_async_copy or is_in_thread_transpose_enabled(options.arch)
-                         or knobs.compilation.enable_asan or os.getenv("PMD_PATH"))
+        if (options.hcu_gemm_matrix_lds and options.arch == "gfx938" and options.num_ctas == 1
+                and options.num_warps == 4 and options.num_stages in (1, 2) and options.kpack == 1
+                and not (options.wasp_enabled or options.wdra_enabled or options.hcu_panel_pipeline or
+                         options.hcu_descriptor_mls_load or knobs.hcu.use_async_copy or is_in_thread_transpose_enabled(
+                             options.arch) or knobs.compilation.enable_asan or os.getenv("PMD_PATH"))
                 and _is_gemm_matrix_lds_candidate(mod)
                 and HIPBackend._supports_gemm_backoff(str(HIPBackend.path_to_rocm_clang().resolve()))):
             builder = ir.builder(mod.context)
@@ -794,21 +800,18 @@ class HIPBackend(BaseBackend):
     def make_llir(src, metadata, options):
         mod = src
         metadata["hcu_gemm_backoff_barrier"] = (
-            options.hcu_gemm_barrier_policy == "auto"
-            and options.arch == "gfx938" and options.num_ctas == 1
+            options.hcu_gemm_barrier_policy == "auto" and options.arch == "gfx938" and options.num_ctas == 1
             and options.num_warps == 4 and options.num_stages in (1, 2)
             and not (options.wasp_enabled or options.wdra_enabled or options.hcu_panel_pipeline
-                     or options.hcu_descriptor_mls_load or knobs.compilation.enable_asan
-                     or os.getenv("PMD_PATH"))
-            and metadata.get("hcu_triton_ttgir", False)
-            and not metadata.get("tensordesc_meta")
+                     or options.hcu_descriptor_mls_load or knobs.compilation.enable_asan or os.getenv("PMD_PATH"))
+            and metadata.get("hcu_triton_ttgir", False) and not metadata.get("tensordesc_meta")
             and _is_sync_buffer_gemm(mod)
-            and HIPBackend._supports_gemm_backoff(str(HIPBackend.path_to_rocm_clang().resolve()))
-        )
+            and HIPBackend._supports_gemm_backoff(str(HIPBackend.path_to_rocm_clang().resolve())))
         builder = ir.builder(mod.context)
         mod.set_attr("hcu.codegen_arch", builder.get_string_attr(options.arch))
         compact = 0
-        if options.arch == 'gfx938' and options.hcu_compact_rsrc != 'none' and HIPBackend._auto_pairing_aicc18(str(HIPBackend.path_to_rocm_clang())):
+        if options.arch == 'gfx938' and options.hcu_compact_rsrc != 'none' and HIPBackend._auto_pairing_aicc18(
+                str(HIPBackend.path_to_rocm_clang())):
             compact = 2 if options.hcu_compact_rsrc == 'auto' else 1
         mod.set_attr("hcu.compact_rsrc", builder.get_int32_attr(compact))
         mod.set_attr("hcu.mmac_issue_group", builder.get_int32_attr(options.mmac_issue_group_size))
@@ -871,12 +874,11 @@ class HIPBackend(BaseBackend):
         passes.common.add_symbol_dce(pm)
 
         if options.wasp_enabled or mod.get_int_attr("tle.hcu.software_ws_2x2"):
-            hcu.passes.ttgpuir.add_warp_specialize_to_llvm(pm, options.arch,
-                                                           2 if mod.get_int_attr("tle.hcu.software_ws_2x2") else options.wasp_num_load_warps,
-                                                           2 if mod.get_int_attr("tle.hcu.software_ws_2x2") else options.wasp_num_mma_warps, options.wdra_enabled,
-                                                           options.wdra_num_load_regs or 0,
-                                                           options.wdra_num_mma_regs_main or 0,
-                                                           options.wdra_num_mma_regs_tail or 0)
+            hcu.passes.ttgpuir.add_warp_specialize_to_llvm(
+                pm, options.arch, 2 if mod.get_int_attr("tle.hcu.software_ws_2x2") else options.wasp_num_load_warps,
+                2 if mod.get_int_attr("tle.hcu.software_ws_2x2") else options.wasp_num_mma_warps, options.wdra_enabled,
+                options.wdra_num_load_regs or 0, options.wdra_num_mma_regs_main or 0, options.wdra_num_mma_regs_tail
+                or 0)
             passes.convert.add_arith_to_llvmir(pm)
             passes.common.add_canonicalizer(pm)
             passes.common.add_cse(pm)
@@ -1034,11 +1036,19 @@ class HIPBackend(BaseBackend):
             if not HIPBackend._auto_pairing_aicc18(str(HIPBackend.path_to_rocm_clang())):
                 raise ValueError('panel pipeline currently requires the verified AICC18 MLS ABI')
             if options.hcu_panel_war_after_mma:
-                panel_report=hcu.optimize_panel_pipeline_deferred(llvm_mod, options.arch, options.num_warps, metadata["shared"], options.hcu_panel_stream_v, options.hcu_identity_rescale, options.hcu_panel_cross_iteration, options.hcu_panel_compact_k, options.hcu_panel_unroll2, options.hcu_panel_native_war, options.hcu_panel_war_after_mma)
+                panel_report = hcu.optimize_panel_pipeline_deferred(
+                    llvm_mod, options.arch, options.num_warps, metadata["shared"], options.hcu_panel_stream_v,
+                    options.hcu_identity_rescale, options.hcu_panel_cross_iteration, options.hcu_panel_compact_k,
+                    options.hcu_panel_unroll2, options.hcu_panel_native_war, options.hcu_panel_war_after_mma)
                 if not panel_report['deferred_WAR_panels']:
-                    raise ValueError('deferred WAR proof failed: '+panel_report['reason'])
+                    raise ValueError('deferred WAR proof failed: ' + panel_report['reason'])
             else:
-                panel_report = hcu.optimize_panel_pipeline(llvm_mod, options.arch, options.num_warps, metadata["shared"], options.hcu_panel_stream_v, options.hcu_identity_rescale, options.hcu_panel_cross_iteration, options.hcu_panel_compact_k, options.hcu_panel_unroll2, options.hcu_panel_native_war)
+                panel_report = hcu.optimize_panel_pipeline(llvm_mod, options.arch, options.num_warps,
+                                                           metadata["shared"], options.hcu_panel_stream_v,
+                                                           options.hcu_identity_rescale,
+                                                           options.hcu_panel_cross_iteration,
+                                                           options.hcu_panel_compact_k, options.hcu_panel_unroll2,
+                                                           options.hcu_panel_native_war)
 
             metadata["shared"] = panel_report["shared"]
             metadata["hcu_panel_pipeline_report"] = panel_report
@@ -1046,11 +1056,12 @@ class HIPBackend(BaseBackend):
         if options.hcu_mmac_priority != 'none':
             if not HIPBackend._auto_pairing_aicc18(str(HIPBackend.path_to_rocm_clang())):
                 raise ValueError('MMAC priority requires verified AICC18')
-            modes={'control':1,'high':2,'yield':3}
-            priority_report=hcu.scope_mmac_priority(llvm_mod,options.arch,options.num_warps,modes[options.hcu_mmac_priority])
+            modes = {'control': 1, 'high': 2, 'yield': 3}
+            priority_report = hcu.scope_mmac_priority(llvm_mod, options.arch, options.num_warps,
+                                                      modes[options.hcu_mmac_priority])
             if not priority_report['groups']:
-                raise ValueError('MMAC priority proof failed: '+priority_report['reason'])
-            metadata['hcu_mmac_priority_report']=priority_report
+                raise ValueError('MMAC priority proof failed: ' + priority_report['reason'])
+            metadata['hcu_mmac_priority_report'] = priority_report
 
         hcu.cleanup_bitcode_metadata(llvm_mod)
         # Disable inlining of print related functions,

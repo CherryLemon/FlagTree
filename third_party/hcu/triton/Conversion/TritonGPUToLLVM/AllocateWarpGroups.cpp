@@ -80,17 +80,21 @@ struct AllocateWarpGroups
         if (op.getPartitionNumWarps().size() != 1 ||
             op.getPartitionNumWarps()[0] != 2 || op.getNumResults() ||
             (op.getRequestedRegisters() &&
-             llvm::any_of(*op.getRequestedRegisters(), [](int32_t n) {return n != 0;}))) {
-          op.emitError("software WS requires one 2-wave worker, void results, no register redistribution");
+             llvm::any_of(*op.getRequestedRegisters(),
+                          [](int32_t n) { return n != 0; }))) {
+          op.emitError("software WS requires one 2-wave worker, void results, "
+                       "no register redistribution");
           bad = true;
         }
         op.setWarpGroupStartIds(ArrayRef<int32_t>{2});
       });
       if (bad || count != 1) {
-        if (count != 1) mod.emitError("software WS requires exactly one region");
+        if (count != 1)
+          mod.emitError("software WS requires exactly one region");
         return signalPassFailure();
       }
-      mod->setAttr("ttg.total-num-warps", Builder(&getContext()).getI32IntegerAttr(4));
+      mod->setAttr("ttg.total-num-warps",
+                   Builder(&getContext()).getI32IntegerAttr(4));
       return;
     }
 

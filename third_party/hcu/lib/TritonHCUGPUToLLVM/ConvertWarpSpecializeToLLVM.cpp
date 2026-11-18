@@ -6,6 +6,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "third_party/hcu/include/Dialect/TritonHCUGPU/IR/Dialect.h"
 #include "third_party/hcu/include/TritonHCUGPUToLLVM/Passes.h"
@@ -13,11 +14,10 @@
 #include "triton/Conversion/TritonGPUToLLVM/TypeConverter.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
-#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/SmallPtrSet.h"
-#include <functional>
 #include <climits>
 #include <cstdlib>
+#include <functional>
 
 namespace mlir::triton {
 #define GEN_PASS_DEF_HCUGPUCONVERTWARPSPECIALIZETOLLVM
@@ -601,15 +601,19 @@ lowerWarpSpecialize(LLVM::LLVMFuncOp func, const HCU::TargetInfo &targetInfo,
 }
 
 // Fixed gfx938 software dispatch, deliberately independent of gfx946 WASP.
-static LogicalResult lowerGfx938SoftwareWS(LLVM::LLVMFuncOp func, Block *&commonExit, bool staticPipe) {
+static LogicalResult lowerGfx938SoftwareWS(LLVM::LLVMFuncOp func,
+                                           Block *&commonExit,
+                                           bool staticPipe) {
   SmallVector<WarpSpecializeOp> ops;
   func.walk([&](WarpSpecializeOp op) { ops.push_back(op); });
-  if (ops.empty()) return success();
-  if (ops.size() != 1) return func.emitError("software WS requires one region");
+  if (ops.empty())
+    return success();
+  if (ops.size() != 1)
+    return func.emitError("software WS requires one region");
   auto ws = ops.front();
   if (ws.getNumResults() || ws.getPartitionRegions().size() != 1 ||
-      ws.getPartitionNumWarps()[0] != 2 ||
-      !ws.getWarpGroupStartIds() || (*ws.getWarpGroupStartIds())[0] != 2)
+      ws.getPartitionNumWarps()[0] != 2 || !ws.getWarpGroupStartIds() ||
+      (*ws.getWarpGroupStartIds())[0] != 2)
     return ws.emitError("invalid fixed software WS allocation");
   if (ws->getBlock() != &func.getBody().front())
     return ws.emitError("software WS must be in the kernel entry block");
@@ -621,7 +625,8 @@ static LogicalResult lowerGfx938SoftwareWS(LLVM::LLVMFuncOp func, Block *&common
   ws.walk([&](Operation *op) {
     StringRef name = op->getName().getStringRef();
     if (name.contains("barrier")) {
-      op->emitError("CTA/native barrier inside gfx938 software role is unsupported");
+      op->emitError(
+          "CTA/native barrier inside gfx938 software role is unsupported");
       unsafe = true;
     }
     if (isa<LLVM::InlineAsmOp>(op)) {
@@ -629,15 +634,19 @@ static LogicalResult lowerGfx938SoftwareWS(LLVM::LLVMFuncOp func, Block *&common
       unsafe = true;
     }
     if (auto intrinsic = dyn_cast<LLVM::CallIntrinsicOp>(op)) {
-      bool provenWaveBarrier=staticPipe && intrinsic.getIntrin()=="llvm.amdgcn.wave.barrier" &&
-          func->getParentOfType<ModuleOp>()->hasAttr("tle.hcu.wave_local_scratch_proven");
+      bool provenWaveBarrier =
+          staticPipe && intrinsic.getIntrin() == "llvm.amdgcn.wave.barrier" &&
+          func->getParentOfType<ModuleOp>()->hasAttr(
+              "tle.hcu.wave_local_scratch_proven");
       if (intrinsic.getIntrin().contains("barrier") && !provenWaveBarrier) {
-        op->emitError("barrier intrinsic inside gfx938 software role is unsupported");
+        op->emitError(
+            "barrier intrinsic inside gfx938 software role is unsupported");
         unsafe = true;
       }
     }
     if (auto call = dyn_cast<LLVM::CallOp>(op)) {
-      if (!call.getCallee() || (!call.getCallee()->starts_with("llvm.") || call.getCallee()->contains("barrier"))) {
+      if (!call.getCallee() || (!call.getCallee()->starts_with("llvm.") ||
+                                call.getCallee()->contains("barrier"))) {
         op->emitError("unproved out-of-line call inside software role");
         unsafe = true;
       }
@@ -648,41 +657,54 @@ static LogicalResult lowerGfx938SoftwareWS(LLVM::LLVMFuncOp func, Block *&common
   for (Region *region : {&ws.getDefaultRegion(), ws.getPartitionRegions()[0]}) {
     llvm::SmallPtrSet<Block *, 16> active, done;
     std::function<bool(Block *)> visit = [&](Block *block) {
-      if (active.contains(block)) return false;
-      if (done.contains(block)) return true;
+      if (active.contains(block))
+        return false;
+      if (done.contains(block))
+        return true;
       active.insert(block);
       for (Block *next : block->getSuccessors())
-        if (!visit(next)) return false;
+        if (!visit(next))
+          return false;
       active.erase(block);
       done.insert(block);
       return true;
     };
-    bool countedProof=staticPipe && func->getParentOfType<ModuleOp>()->hasAttr(HCU::static_pipe::countedAttr);
+    bool countedProof =
+        staticPipe && func->getParentOfType<ModuleOp>()->hasAttr(
+                          HCU::static_pipe::countedAttr);
     for (Block &block : *region)
       if (!countedProof && !visit(&block)) {
-        ws.emitError("software role CFG must be acyclic until bounded pipe lifecycle analysis is available");
+        ws.emitError("software role CFG must be acyclic until bounded pipe "
+                     "lifecycle analysis is available");
         unsafe = true;
         break;
       }
   }
-  if (unsafe) return failure();
+  if (unsafe)
+    return failure();
   // Common-prefix effects need a separate four-wave initialization proof.
   for (Operation &op : ws->getBlock()->without_terminator()) {
-    if (&op == ws.getOperation()) break;
-    bool fp8ModeInitializer=false;
-    if (staticPipe) if(auto call=dyn_cast<LLVM::CallIntrinsicOp>(op)) {
-      auto literal=[](Value value,int64_t expected) {
-        auto c=value.getDefiningOp<LLVM::ConstantOp>();
-        auto a=c?dyn_cast<IntegerAttr>(c.getValue()):IntegerAttr();
-        return a && a.getType().isInteger(32) && a.getInt()==expected;
-      };
-      // Exactly the HCU compiler's per-wave FP8 clamp setup, before dispatch.
-      // It runs in every physical wave; no host/device-global state is changed.
-      fp8ModeInitializer=call.getIntrin()=="llvm.amdgcn.s.setreg" && call->getNumOperands()==2 &&
-          literal(call->getOperand(0),0x1016) && literal(call->getOperand(1),7);
-    }
+    if (&op == ws.getOperation())
+      break;
+    bool fp8ModeInitializer = false;
+    if (staticPipe)
+      if (auto call = dyn_cast<LLVM::CallIntrinsicOp>(op)) {
+        auto literal = [](Value value, int64_t expected) {
+          auto c = value.getDefiningOp<LLVM::ConstantOp>();
+          auto a = c ? dyn_cast<IntegerAttr>(c.getValue()) : IntegerAttr();
+          return a && a.getType().isInteger(32) && a.getInt() == expected;
+        };
+        // Exactly the HCU compiler's per-wave FP8 clamp setup, before dispatch.
+        // It runs in every physical wave; no host/device-global state is
+        // changed.
+        fp8ModeInitializer = call.getIntrin() == "llvm.amdgcn.s.setreg" &&
+                             call->getNumOperands() == 2 &&
+                             literal(call->getOperand(0), 0x1016) &&
+                             literal(call->getOperand(1), 7);
+      }
     if (!isMemoryEffectFree(&op) && !fp8ModeInitializer &&
-        !(staticPipe && isa<mlir::triton::tle::PipeCreateOp>(op) && op.hasAttr(HCU::static_pipe::verifiedAttr)))
+        !(staticPipe && isa<mlir::triton::tle::PipeCreateOp>(op) &&
+          op.hasAttr(HCU::static_pipe::verifiedAttr)))
       return op.emitError("unproved common-prefix effect before software WS");
   }
   for (Operation *op = ws->getNextNode(); op; op = op->getNextNode())
@@ -693,12 +715,13 @@ static LogicalResult lowerGfx938SoftwareWS(LLVM::LLVMFuncOp func, Block *&common
   Region &def = ws.getDefaultRegion();
   Region *worker = ws.getPartitionRegions()[0];
   Block *defaultEntry = &def.front(), *workerEntry = &worker->front();
-  for (auto [arg, capture] : llvm::zip(workerEntry->getArguments(), ws.getOperands()))
+  for (auto [arg, capture] :
+       llvm::zip(workerEntry->getArguments(), ws.getOperands()))
     arg.replaceAllUsesWith(capture);
   workerEntry->eraseArguments([](BlockArgument) { return true; });
   Block *before = ws->getBlock();
   Block *join = before->splitBlock(ws);
-  commonExit=join;
+  commonExit = join;
   SmallVector<Operation *> exits;
   def.walk([&](WarpYieldOp op) { exits.push_back(op); });
   worker->walk([&](WarpReturnOp op) { exits.push_back(op); });
@@ -713,12 +736,15 @@ static LogicalResult lowerGfx938SoftwareWS(LLVM::LLVMFuncOp func, Block *&common
   Location loc = ws.getLoc();
   auto i32 = b.getI32Type();
   Value tid = b.create<ROCDL::ThreadIdXOp>(loc, i32);
-  Value wave = b.create<LLVM::LShrOp>(loc, tid,
-      b.create<LLVM::ConstantOp>(loc, i32, b.getI32IntegerAttr(6)));
-  wave = b.create<LLVM::InlineAsmOp>(loc, i32, ValueRange{wave},
-      "v_readfirstlane_b32 $0, $1", "=s,v", false, false, LLVM::tailcallkind::TailCallKind::None,
-      LLVM::AsmDialectAttr(), ArrayAttr()).getResult(0);
-  Value chooseDefault = b.create<LLVM::ICmpOp>(loc, LLVM::ICmpPredicate::ult, wave,
+  Value wave = b.create<LLVM::LShrOp>(
+      loc, tid, b.create<LLVM::ConstantOp>(loc, i32, b.getI32IntegerAttr(6)));
+  wave = b.create<LLVM::InlineAsmOp>(
+              loc, i32, ValueRange{wave}, "v_readfirstlane_b32 $0, $1", "=s,v",
+              false, false, LLVM::tailcallkind::TailCallKind::None,
+              LLVM::AsmDialectAttr(), ArrayAttr())
+             .getResult(0);
+  Value chooseDefault = b.create<LLVM::ICmpOp>(
+      loc, LLVM::ICmpPredicate::ult, wave,
       b.create<LLVM::ConstantOp>(loc, i32, b.getI32IntegerAttr(2)));
   b.create<LLVM::CondBrOp>(loc, chooseDefault, defaultEntry, workerEntry);
   b.setInsertionPointToStart(join);
@@ -784,15 +810,24 @@ struct HCUGPUConvertWarpSpecializeToLLVM
 
     for (LLVM::LLVMFuncOp kernel : kernels) {
       if (software938) {
-        bool hasPipe=false;kernel.walk([&](mlir::triton::tle::PipeCreateOp){hasPipe=true;});
+        bool hasPipe = false;
+        kernel.walk([&](mlir::triton::tle::PipeCreateOp) { hasPipe = true; });
         if (hasPipe && !mod->hasAttr(HCU::static_pipe::verifiedAttr)) {
-          kernel.emitError("missing static pipe proof before software dispatch");return signalPassFailure();
+          kernel.emitError(
+              "missing static pipe proof before software dispatch");
+          return signalPassFailure();
         }
-        Block *commonExit=nullptr;
-        if (failed(lowerGfx938SoftwareWS(kernel,commonExit,hasPipe))) return signalPassFailure();
-        if (hasPipe && (!commonExit || failed(HCU::static_pipe::lower(kernel,commonExit)))) return signalPassFailure();
-      } else if (failed(lowerWarpSpecialize(kernel,targetInfo,this->waspNumLoadWarps,this->waspNumMmaWarps,
-                 this->wdraEnabled,this->wdraNumLoadRegs,this->wdraNumMmaRegsMain,this->wdraNumMmaRegsTail)))
+        Block *commonExit = nullptr;
+        if (failed(lowerGfx938SoftwareWS(kernel, commonExit, hasPipe)))
+          return signalPassFailure();
+        if (hasPipe && (!commonExit ||
+                        failed(HCU::static_pipe::lower(kernel, commonExit))))
+          return signalPassFailure();
+      } else if (failed(lowerWarpSpecialize(
+                     kernel, targetInfo, this->waspNumLoadWarps,
+                     this->waspNumMmaWarps, this->wdraEnabled,
+                     this->wdraNumLoadRegs, this->wdraNumMmaRegsMain,
+                     this->wdraNumMmaRegsTail)))
         return signalPassFailure();
     }
 
