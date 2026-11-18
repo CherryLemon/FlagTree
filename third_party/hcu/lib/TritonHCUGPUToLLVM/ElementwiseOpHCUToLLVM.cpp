@@ -2423,8 +2423,7 @@ struct PackedF32OpConversion
                                    ConversionPatternRewriter &rewriter,
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
-    if (!elemTy.isF32() ||
-        this->gpuKind != llvm::AMDGPU::GPUKind::GK_GFX938)
+    if (!elemTy.isF32() || this->gpuKind != llvm::AMDGPU::GPUKind::GK_GFX938)
       return {};
     auto policy = op->template getParentOfType<ModuleOp>()
                       ->template getAttrOfType<IntegerAttr>("hcu.packed_f32");
@@ -2436,9 +2435,11 @@ struct PackedF32OpConversion
       if constexpr (std::is_same_v<SourceOp, math::FmaOp>)
         return {rewriter.create<LLVM::FMAOp>(loc, elemTy, operands[0])};
       else if constexpr (std::is_same_v<SourceOp, arith::SubFOp>)
-        return {rewriter.create<LLVM::FSubOp>(loc, elemTy, operands[0][0], operands[0][1])};
+        return {rewriter.create<LLVM::FSubOp>(loc, elemTy, operands[0][0],
+                                              operands[0][1])};
       else
-        return {rewriter.create<LLVM::FAddOp>(loc, elemTy, operands[0][0], operands[0][1])};
+        return {rewriter.create<LLVM::FAddOp>(loc, elemTy, operands[0][0],
+                                              operands[0][1])};
     }
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto v2ty = vec_ty(elemTy, 2);
@@ -2453,7 +2454,8 @@ struct PackedF32OpConversion
       args.push_back(v);
     }
     StringRef name = std::is_same_v<SourceOp, math::FmaOp>
-                         ? "llvm.hcu.pk.fma.f32" : "llvm.hcu.pk.add.f32";
+                         ? "llvm.hcu.pk.fma.f32"
+                         : "llvm.hcu.pk.add.f32";
     SmallVector<Type> argTypes(args.size(), v2ty);
     // The installed HCU intrinsic declaration is variadic, with 2/3 fixed
     // vector operands. Keep that ABI rather than borrowing another SDK's IR.
@@ -2464,7 +2466,6 @@ struct PackedF32OpConversion
             b.extract_element(elemTy, value, b.i32_val(1))};
   }
 };
-
 
 // Optional gfx938/AICC18 lane-wise pairing, modeled on the public vendor
 // backend's LLVM vector representation (triton-das 5b24821). No algebraic
@@ -2478,11 +2479,13 @@ struct VectorF32OpConversion
   using Base::Base;
   using OpAdaptor = typename Base::OpAdaptor;
   SmallVector<Value> createDestOps(SourceOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter, Type elemTy,
-      MultipleOperandsRange operands, Location loc) const {
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
     auto policy = op->template getParentOfType<ModuleOp>()
                       ->template getAttrOfType<IntegerAttr>("hcu.packed_f32");
-    constexpr unsigned mask = std::is_same_v<SourceOp, math::FmaOp> ? 4 : (4 | 16);
+    constexpr unsigned mask =
+        std::is_same_v<SourceOp, math::FmaOp> ? 4 : (4 | 16);
     if (!elemTy.isF32() || this->gpuKind != llvm::AMDGPU::GPUKind::GK_GFX938 ||
         !policy || !(policy.getInt() & mask))
       return {};
@@ -2505,15 +2508,16 @@ struct VectorF32OpConversion
 
 template <typename SourceOp>
 struct PairedDowncastOpConversion
-    : ElementwiseOpConversionWithTargetInfoBase<SourceOp,
-                                                PairedDowncastOpConversion<SourceOp>> {
-  using Base = ElementwiseOpConversionWithTargetInfoBase<SourceOp,
-                                                         PairedDowncastOpConversion<SourceOp>>;
+    : ElementwiseOpConversionWithTargetInfoBase<
+          SourceOp, PairedDowncastOpConversion<SourceOp>> {
+  using Base = ElementwiseOpConversionWithTargetInfoBase<
+      SourceOp, PairedDowncastOpConversion<SourceOp>>;
   using Base::Base;
   using OpAdaptor = typename Base::OpAdaptor;
   SmallVector<Value> createDestOps(SourceOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter, Type elemTy,
-      MultipleOperandsRange operands, Location loc) const {
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
     auto policy = op->template getParentOfType<ModuleOp>()
                       ->template getAttrOfType<IntegerAttr>("hcu.packed_f32");
     if constexpr (std::is_same_v<SourceOp, triton::FpToFpOp>) {
@@ -2523,26 +2527,27 @@ struct PairedDowncastOpConversion
     auto inputTy = getElementType(op->getOperand(0));
     auto outputTy = getElementType(op->getResult(0));
     if (!inputTy.isF32() || !(outputTy.isBF16() || outputTy.isF16()) ||
-        this->gpuKind != llvm::AMDGPU::GPUKind::GK_GFX938 ||
-        !policy || !(policy.getInt() & (4 | 8)))
+        this->gpuKind != llvm::AMDGPU::GPUKind::GK_GFX938 || !policy ||
+        !(policy.getInt() & (4 | 8)))
       return {};
     if (operands.size() == 1) {
       if (outputTy.isBF16())
         return {convertFp32ToBf16(loc, rewriter, operands[0][0],
-                                 RoundingMode::RTNE, this->capBF16F32)};
+                                  RoundingMode::RTNE, this->capBF16F32)};
       return {rewriter.create<LLVM::FPTruncOp>(loc, elemTy, operands[0][0])};
     }
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     Type ty = vec_ty(elemTy, 2);
     SmallVector<Value> args = {b.i32_val(0), operands[0][0], b.i32_val(0),
-                               operands[1][0], LLVM::createConstantI1(loc, rewriter, false)};
+                               operands[1][0],
+                               LLVM::createConstantI1(loc, rewriter, false)};
     StringRef name = "llvm.hcu.cvt.pk.bf16.f32";
     if (outputTy.isF16()) {
       name = "llvm.hcu.cvt.pk.f16.f32";
       args.push_back(b.i32_val(0));
     }
     auto packed = LLVM::createLLVMIntrinsicCallOp(rewriter, loc, name,
-                                                 TypeRange{ty}, args);
+                                                  TypeRange{ty}, args);
     Value result = packed->getResult(0);
     return {b.extract_element(elemTy, result, b.i32_val(0)),
             b.extract_element(elemTy, result, b.i32_val(1))};

@@ -126,19 +126,23 @@ getDotOpIdxFromMatrixLoad(triton::MatrixLoadOp matrixOp) {
   llvm::DenseSet<Value> visited;
   for (size_t head = 0; head < pending.size(); ++head) {
     Value value = pending[head];
-    if (!visited.insert(value).second) continue;
+    if (!visited.insert(value).second)
+      continue;
     for (OpOperand &use : value.getUses()) {
       Operation *user = use.getOwner();
       unsigned operand = use.getOperandNumber();
       if (auto dot = dyn_cast<triton::DotOp>(user)) {
-        if (operand < 2) return success(std::make_pair(dot, operand));
+        if (operand < 2)
+          return success(std::make_pair(dot, operand));
         continue;
       }
       if (auto yield = dyn_cast<scf::YieldOp>(user)) {
         Operation *parent = yield->getParentOp();
-        if (operand < parent->getNumResults()) pending.push_back(parent->getResult(operand));
+        if (operand < parent->getNumResults())
+          pending.push_back(parent->getResult(operand));
         if (auto loop = dyn_cast<scf::ForOp>(parent))
-          if (operand < loop.getNumRegionIterArgs()) pending.push_back(loop.getRegionIterArgs()[operand]);
+          if (operand < loop.getNumRegionIterArgs())
+            pending.push_back(loop.getRegionIterArgs()[operand]);
         continue;
       }
       if (auto loop = dyn_cast<scf::ForOp>(user)) {

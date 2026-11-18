@@ -1018,9 +1018,11 @@ LogicalResult WarpSpecializeOp::verify() {
     // Before target conversion, explicit tensor layouts may already expose
     // the fixed two-wave count. Defer target-specific validation until the
     // backend has installed the software-WS marker and ttg.target.
-    software938 = mod->hasAttr("tle.hcu.software_ws_2x2") || !mod->hasAttr("ttg.target");
+    software938 =
+        mod->hasAttr("tle.hcu.software_ws_2x2") || !mod->hasAttr("ttg.target");
   bool fixedSoftware = software938 && numWarps && *numWarps == 2 &&
-      getPartitionNumWarps().size() == 1 && getPartitionNumWarps()[0] == 2;
+                       getPartitionNumWarps().size() == 1 &&
+                       getPartitionNumWarps()[0] == 2;
   if (numWarps && *numWarps % 4 != 0 && !fixedSoftware) {
     return mlir::emitError(getLoc()) << "warp-specialized kernels requires "
                                         "num_warps to be a multiple of 4";

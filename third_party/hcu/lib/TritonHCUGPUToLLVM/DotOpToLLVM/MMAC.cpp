@@ -383,40 +383,41 @@ struct DotOpMFMAConversionHelper {
           for (int m = 0; m < numRepM; ++m)
             for (int j = 0; j < width; ++j)
               adjustAccForSmallKDim(fc, accumulators[m * width + j], dstElemTy,
-                                   batch, m, n0 + j, numRepM, numRepN,
-                                   kDimInstrSize, kDimOperandSize, elemsPerVec);
+                                    batch, m, n0 + j, numRepM, numRepN,
+                                    kDimInstrSize, kDimOperandSize,
+                                    elemsPerVec);
         }
       }
     } else {
-    for (int b = 0; b < numRepB; ++b) {
-      for (int m = 0; m < numRepM; ++m) {
-        for (int n = 0; n < numRepN; ++n) {
-          Value acc = tb.undef(vecTy);
+      for (int b = 0; b < numRepB; ++b) {
+        for (int m = 0; m < numRepM; ++m) {
+          for (int n = 0; n < numRepN; ++n) {
+            Value acc = tb.undef(vecTy);
 
-          for (int v = 0; v < elemsPerVec; ++v) {
-            int linearIdx = linearize({b, m, n, v}, fcStrides);
-            Value c = fc[linearIdx];
-            acc = tb.insert_element(vecTy, acc, c, tb.i32_val(v));
+            for (int v = 0; v < elemsPerVec; ++v) {
+              int linearIdx = linearize({b, m, n, v}, fcStrides);
+              Value c = fc[linearIdx];
+              acc = tb.insert_element(vecTy, acc, c, tb.i32_val(v));
+            }
+
+            for (int k = 0; k < numVecInKBase; ++k) {
+              Value op1 = operandA[{b, m, k}];
+              Value op2 = operandB[{b, n, k}];
+
+              if (mfmaLayout.getIsTransposed())
+                std::swap(op1, op2);
+
+              acc = generateMFMAOp(intrinsicName, op1, op2, acc, mmacLayout);
+
+              if (!firstMfma)
+                firstMfma = acc;
+            }
+
+            adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
+                                  kDimInstrSize, kDimOperandSize, elemsPerVec);
           }
-
-          for (int k = 0; k < numVecInKBase; ++k) {
-            Value op1 = operandA[{b, m, k}];
-            Value op2 = operandB[{b, n, k}];
-
-            if (mfmaLayout.getIsTransposed())
-              std::swap(op1, op2);
-
-            acc = generateMFMAOp(intrinsicName, op1, op2, acc, mmacLayout);
-
-            if (!firstMfma)
-              firstMfma = acc;
-          }
-
-          adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
-                                kDimInstrSize, kDimOperandSize, elemsPerVec);
         }
       }
-    }
     }
 
     // Originally, setprio (high) is set to the high-level dot op. After dot is

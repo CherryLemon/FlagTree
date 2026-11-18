@@ -5,6 +5,7 @@ import torch
 import triton
 from triton.backends.compiler import GPUTarget
 
+
 @pytest.mark.parametrize('dtype', ['int8', 'fp8'])
 def test_shared_linear_repeated_mmac(dtype):
     if not torch.cuda.is_available():
@@ -22,8 +23,7 @@ def test_shared_linear_repeated_mmac(dtype):
         ref = a @ b
         dt = torch.int8 if dtype == 'int8' else torch.float8_e4m3fn
         ga, gb = a.to(dt).cuda(), b.to(dt).cuda()
-        out = torch.full((64, 128), 123456, device='cuda',
-                         dtype=torch.int32 if dtype == 'int8' else torch.float32)
+        out = torch.full((64, 128), 123456, device='cuda', dtype=torch.int32 if dtype == 'int8' else torch.float32)
         kernel[(1, 1, 1)](ga, gb, out)
         torch.cuda.synchronize()
         torch.testing.assert_close(out.cpu().float(), ref, atol=0, rtol=0)

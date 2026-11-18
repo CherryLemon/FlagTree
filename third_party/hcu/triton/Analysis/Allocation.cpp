@@ -306,11 +306,12 @@ private:
         // Independently progressing software waves cannot reuse scratch across
         // conversions with different wave/address partitions. The structural
         // verifier clears and recomputes this marker before allocation.
-        auto mod=op->template getParentOfType<ModuleOp>();
+        auto mod = op->template getParentOfType<ModuleOp>();
         if (op->hasAttr("tle.hcu.wave_local_scratch") && mod &&
             mod->hasAttr("tle.hcu.wave_local_scratch_proven") &&
             mod->hasAttr("tle.hcu.static_pipe_verified")) {
-          bufferRange.insert({buffer,Interval(size_t(),std::numeric_limits<size_t>::max())});
+          bufferRange.insert(
+              {buffer, Interval(size_t(), std::numeric_limits<size_t>::max())});
           continue;
         }
         // Any scratch memory's live range is the current operation's live

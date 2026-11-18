@@ -9,9 +9,16 @@ import triton.language as tl
 
 @triton.jit
 def _gemm(
-    a, b, c,
-    n: tl.constexpr, k: tl.constexpr, bsk: tl.constexpr, bsn: tl.constexpr,
-    tm: tl.constexpr, tn: tl.constexpr, tk: tl.constexpr,
+    a,
+    b,
+    c,
+    n: tl.constexpr,
+    k: tl.constexpr,
+    bsk: tl.constexpr,
+    bsn: tl.constexpr,
+    tm: tl.constexpr,
+    tn: tl.constexpr,
+    tk: tl.constexpr,
 ):
     m_ids = tl.program_id(0) * tm + tl.arange(0, tm)
     n_ids = tl.program_id(1) * tn + tl.arange(0, tn)
@@ -55,8 +62,19 @@ def test_matrix_lds_gemm(dtype):
 
     for rhs, enable, selected in ((b, True, True), (b, False, False), (k_contiguous_b, True, False)):
         compiled = _gemm[(m // tm, n // tn)](
-            a, rhs, c, n, k, rhs.stride(0), rhs.stride(1), tm, tn, tk,
-            num_warps=4, num_stages=1, matrix_instr_nonkdim=16,
+            a,
+            rhs,
+            c,
+            n,
+            k,
+            rhs.stride(0),
+            rhs.stride(1),
+            tm,
+            tn,
+            tk,
+            num_warps=4,
+            num_stages=1,
+            matrix_instr_nonkdim=16,
             hcu_gemm_matrix_lds=enable,
         )
         assert (opcode in compiled.asm["amdgcn"]) == selected

@@ -25,10 +25,10 @@ def _integer_fp8(x, y, dst: tl.constexpr):
 def test_fp8_integer_mask_other(dtype, n, other):
     cpu = (torch.arange(n).float() % 17 - 8).to(dtype)
     x = cpu.cuda()
-    storage = torch.full((258,), 12345.25, device="cuda")
+    storage = torch.full((258, ), 12345.25, device="cuda")
     y = storage[1:257]
-    _masked_fp8[(1,)](x, y, n, other, num_warps=4)
-    expected = torch.full((256,), torch.tensor(float(other)).to(dtype).float().item())
+    _masked_fp8[(1, )](x, y, n, other, num_warps=4)
+    expected = torch.full((256, ), torch.tensor(float(other)).to(dtype).float().item())
     expected[:n] = cpu.float()
     torch.testing.assert_close(y.cpu(), expected, atol=0, rtol=0)
     assert storage[0].item() == 12345.25 and storage[-1].item() == 12345.25
@@ -43,20 +43,19 @@ def test_masked_load_signed_zero_bits(dtype, n, other, monkeypatch):
     monkeypatch.setenv("AMDGCN_USE_BUFFER_OPS", "1")
     cpu = torch.tensor([0.0, -0.0, 1.0, -1.0, 2.0, -2.0, -0.0][:n]).to(dtype)
     y = torch.empty(256, device="cuda")
-    _masked_fp8[(1,)](cpu.cuda(), y, n, other, num_warps=4)
-    expected = torch.full((256,), other)
+    _masked_fp8[(1, )](cpu.cuda(), y, n, other, num_warps=4)
+    expected = torch.full((256, ), other)
     expected[:n] = cpu.float()
     assert torch.equal(y.cpu().view(torch.int32), expected.view(torch.int32))
 
 
-@pytest.mark.parametrize("dtype,dst", [(torch.float8_e4m3fn, tl.float8e4nv),
-                                       (torch.float8_e5m2, tl.float8e5)])
-@pytest.mark.parametrize("integer", [torch.bool, torch.int8, torch.uint8, torch.int16,
-                                    torch.int32, torch.uint32, torch.int64, torch.uint64])
+@pytest.mark.parametrize("dtype,dst", [(torch.float8_e4m3fn, tl.float8e4nv), (torch.float8_e5m2, tl.float8e5)])
+@pytest.mark.parametrize(
+    "integer", [torch.bool, torch.int8, torch.uint8, torch.int16, torch.int32, torch.uint32, torch.int64, torch.uint64])
 def test_integer_to_fp8(dtype, dst, integer):
     cpu = (torch.arange(128) % 2 if integer == torch.bool else torch.arange(128)).to(integer)
     y = torch.empty(128, device="cuda")
-    _integer_fp8[(1,)](cpu.cuda(), y, dst, num_warps=4)
+    _integer_fp8[(1, )](cpu.cuda(), y, dst, num_warps=4)
     torch.testing.assert_close(y.cpu(), cpu.float().to(dtype).float(), atol=0, rtol=0)
 
 
@@ -64,10 +63,10 @@ def test_integer_to_fp8(dtype, dst, integer):
 def test_fp8_integer_other_graph_changed_input(dtype):
     x = torch.arange(7).to(dtype).cuda()
     y = torch.empty(256, device="cuda")
-    _masked_fp8[(1,)](x, y, 7, 0, num_warps=4)
+    _masked_fp8[(1, )](x, y, 7, 0, num_warps=4)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        _masked_fp8[(1,)](x, y, 7, 0, num_warps=4)
+        _masked_fp8[(1, )](x, y, 7, 0, num_warps=4)
     for epoch in (1, 2, 0):
         cpu = (torch.arange(7).float() - epoch).to(dtype)
         x.copy_(cpu)

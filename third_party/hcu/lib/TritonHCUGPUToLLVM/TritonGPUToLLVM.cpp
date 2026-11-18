@@ -1,12 +1,11 @@
 #include "TritonHCUGPUToLLVM/Passes.h"
 
-#include "AsyncUtility.h"
 #include "Analysis/HCUGPUAllocation.h"
-#include "triton/Conversion/TritonGPUToLLVM/AllocateSharedMemoryUtility.h"
-#include "TritonHCUGPUToLLVM/StaticPipe.h"
+#include "AsyncUtility.h"
 #include "PatternTritonGPUOpToLLVM.h"
 #include "TargetInfo.h"
 #include "TritonHCUGPUToLLVM/MembarUtility.h"
+#include "TritonHCUGPUToLLVM/StaticPipe.h"
 #include "TritonHCUGPUToLLVM/WaitCntHCUUtility.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
@@ -21,6 +20,7 @@
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Pass/Pass.h"
+#include "triton/Conversion/TritonGPUToLLVM/AllocateSharedMemoryUtility.h"
 #ifdef __TLE__
 #include "tle/dialect/include/Conversion/TleToLLVM/ExclusiveCumsumOpToLLVM.h"
 #include "tle/dialect/include/Conversion/TleToLLVM/ExtractOpToLLVM.h"
@@ -59,8 +59,8 @@ public:
     addLegalOp<mlir::UnrealizedConversionCastOp>();
 
 #ifdef __TLE__
-    addLegalOp<triton::tle::PipeCreateOp,triton::tle::PipeWriterAcquireOp,
-               triton::tle::PipeWriterCommitOp,triton::tle::PipeReaderWaitOp,
+    addLegalOp<triton::tle::PipeCreateOp, triton::tle::PipeWriterAcquireOp,
+               triton::tle::PipeWriterCommitOp, triton::tle::PipeReaderWaitOp,
                triton::tle::PipeReaderReleaseOp>();
 #endif
     // Warp specialization is lowered later.
@@ -89,8 +89,8 @@ public:
     addLegalOp<triton::hcugpu::InstructionSchedHint>();
 
 #ifdef __TLE__
-    addLegalOp<triton::tle::PipeCreateOp,triton::tle::PipeWriterAcquireOp,
-               triton::tle::PipeWriterCommitOp,triton::tle::PipeReaderWaitOp,
+    addLegalOp<triton::tle::PipeCreateOp, triton::tle::PipeWriterAcquireOp,
+               triton::tle::PipeWriterCommitOp, triton::tle::PipeReaderWaitOp,
                triton::tle::PipeReaderReleaseOp>();
 #endif
     // Warp specialization is lowered later.
@@ -110,8 +110,8 @@ public:
     addLegalDialect<arith::ArithDialect, LLVM::LLVMDialect, ROCDL::ROCDLDialect,
                     mlir::scf::SCFDialect>();
     addIllegalDialect<triton::tle::TleDialect>();
-    addLegalOp<triton::tle::PipeCreateOp,triton::tle::PipeWriterAcquireOp,
-               triton::tle::PipeWriterCommitOp,triton::tle::PipeReaderWaitOp,
+    addLegalOp<triton::tle::PipeCreateOp, triton::tle::PipeWriterAcquireOp,
+               triton::tle::PipeWriterCommitOp, triton::tle::PipeReaderWaitOp,
                triton::tle::PipeReaderReleaseOp>();
     addLegalOp<mlir::UnrealizedConversionCastOp>();
     markUnknownOpDynamicallyLegal([](Operation *) -> bool { return true; });
@@ -171,21 +171,26 @@ struct ConvertTritonHCUGPUToLLVM
       return signalPassFailure();
     }
 
-    // Resolve the default policy while typed dot/specialization operations still
-    // exist. Do not infer kernel classes from Python names or benchmark shapes.
+    // Resolve the default policy while typed dot/specialization operations
+    // still exist. Do not infer kernel classes from Python names or benchmark
+    // shapes.
     if (auto policy = mod->getAttrOfType<IntegerAttr>("hcu.packed_f32");
         policy && policy.getInt() == 32) {
       bool hasDot = false, hasSpecialization = false;
       mod.walk([&](Operation *op) {
         StringRef name = op->getName().getStringRef();
         hasDot |= name == "tt.dot" || name == "tt.dot_scaled";
-        hasSpecialization |= name == "tle.dsl_region" || name == "ttg.warp_specialize";
+        hasSpecialization |=
+            name == "tle.dsl_region" || name == "ttg.warp_specialize";
       });
-      bool eligible = targetInfo.getGPUKind() == llvm::AMDGPU::GPUKind::GK_GFX938 &&
-                      !hasDot && !hasSpecialization;
+      bool eligible =
+          targetInfo.getGPUKind() == llvm::AMDGPU::GPUKind::GK_GFX938 &&
+          !hasDot && !hasSpecialization;
       OpBuilder policyBuilder(context);
-      mod->setAttr("hcu.packed_f32", policyBuilder.getI32IntegerAttr(eligible ? (8 | 16) : 0));
-      mod->setAttr("hcu.auto_pairing_applied", policyBuilder.getBoolAttr(eligible));
+      mod->setAttr("hcu.packed_f32",
+                   policyBuilder.getI32IntegerAttr(eligible ? (8 | 16) : 0));
+      mod->setAttr("hcu.auto_pairing_applied",
+                   policyBuilder.getBoolAttr(eligible));
     }
 
     // Compact range materialization is default only for the measured class
@@ -201,11 +206,14 @@ struct ConvertTritonHCUGPUToLLVM
         excluded |= name == "tt.dot" || name == "tt.dot_scaled" ||
                     name == "tle.dsl_region" || name == "ttg.warp_specialize";
       });
-      bool enabled = targetInfo.getGPUKind() == llvm::AMDGPU::GPUKind::GK_GFX938 &&
-                     !excluded && fmas >= 32;
+      bool enabled =
+          targetInfo.getGPUKind() == llvm::AMDGPU::GPUKind::GK_GFX938 &&
+          !excluded && fmas >= 32;
       OpBuilder policyBuilder(context);
-      mod->setAttr("hcu.compact_rsrc", policyBuilder.getI32IntegerAttr(enabled));
-      mod->setAttr("hcu.auto_compact_rsrc_applied", policyBuilder.getBoolAttr(enabled));
+      mod->setAttr("hcu.compact_rsrc",
+                   policyBuilder.getI32IntegerAttr(enabled));
+      mod->setAttr("hcu.auto_compact_rsrc_applied",
+                   policyBuilder.getBoolAttr(enabled));
     }
 
     mlir::LowerToLLVMOptions option(context);
@@ -218,8 +226,10 @@ struct ConvertTritonHCUGPUToLLVM
     int threadsPerWarp = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
 
     // Allocate shared memory and set barrier
-    if (failed(triton::HCU::static_pipe::foldPipeDotStaging(mod))) return signalPassFailure();
-    if (failed(triton::HCU::static_pipe::verifyGPU(mod))) return signalPassFailure();
+    if (failed(triton::HCU::static_pipe::foldPipeDotStaging(mod)))
+      return signalPassFailure();
+    if (failed(triton::HCU::static_pipe::verifyGPU(mod)))
+      return signalPassFailure();
     if (mod->hasAttr(triton::HCU::static_pipe::countedAttr)) {
       // Prove the structured bounded lifecycle before destroying its SCF loop.
       // Lower it before LLVM type conversion so register carries use ordinary
@@ -228,58 +238,87 @@ struct ConvertTritonHCUGPUToLLVM
       populateSCFToControlFlowConversionPatterns(loopPatterns);
       ConversionTarget loopTarget(*context);
       loopTarget.addIllegalDialect<scf::SCFDialect>();
-      loopTarget.markUnknownOpDynamicallyLegal([](Operation*) {return true;});
-      if (failed(applyPartialConversion(mod,loopTarget,std::move(loopPatterns)))) return signalPassFailure();
+      loopTarget.markUnknownOpDynamicallyLegal(
+          [](Operation *) { return true; });
+      if (failed(
+              applyPartialConversion(mod, loopTarget, std::move(loopPatterns))))
+        return signalPassFailure();
     }
-    bool verifiedPipe=mod->hasAttr(triton::HCU::static_pipe::verifiedAttr);
-    ModuleAllocation allocation(mod,verifiedPipe ? triton::HCU::HCUAllocationAnalysisScratchSizeFn :
-        triton::defaultAllocationAnalysisScratchSizeFn);
+    bool verifiedPipe = mod->hasAttr(triton::HCU::static_pipe::verifiedAttr);
+    ModuleAllocation allocation(
+        mod, verifiedPipe ? triton::HCU::HCUAllocationAnalysisScratchSizeFn
+                          : triton::defaultAllocationAnalysisScratchSizeFn);
     if (verifiedPipe) {
       // Rewrites above can add scratch. The earlier allocator's attributes are
       // stale; analysis and codegen must use exactly the same fresh offsets.
-      mod.walk([](Operation *op){op->removeAttr("allocation.offset");});
-      triton::gpu::attachAllocationSizeAndOffsetAttr(mod,allocation);
-      bool bad=allocation.getSharedMemorySize()>65536;
-      SmallVector<Attribute> audit,explicitAudit;OpBuilder proofBuilder(context);
+      mod.walk([](Operation *op) { op->removeAttr("allocation.offset"); });
+      triton::gpu::attachAllocationSizeAndOffsetAttr(mod, allocation);
+      bool bad = allocation.getSharedMemorySize() > 65536;
+      SmallVector<Attribute> audit, explicitAudit;
+      OpBuilder proofBuilder(context);
       mod.walk([&](triton::FuncOp func) {
-        auto *data=allocation.getFuncData(func);
-        SmallVector<std::pair<Allocation::BufferId,Operation*>> scratch,all;
+        auto *data = allocation.getFuncData(func);
+        SmallVector<std::pair<Allocation::BufferId, Operation *>> scratch, all;
         func.walk([&](Operation *op) {
-          auto id=data->getBufferId(op);
-          if(id!=Allocation::InvalidBufferId) {
-            all.push_back({id,op});
-            if(op->hasAttr("tle.hcu.wave_local_scratch"))scratch.push_back({id,op});
+          auto id = data->getBufferId(op);
+          if (id != Allocation::InvalidBufferId) {
+            all.push_back({id, op});
+            if (op->hasAttr("tle.hcu.wave_local_scratch"))
+              scratch.push_back({id, op});
           }
-          if(auto alloc=dyn_cast<triton::gpu::LocalAllocOp>(op)) {
-            id=data->getBufferId(alloc.getResult());
-            if(id!=Allocation::InvalidBufferId) {
-              all.push_back({id,op});
-              explicitAudit.push_back(proofBuilder.getDictionaryAttr({
-                  proofBuilder.getNamedAttr("offset",proofBuilder.getI64IntegerAttr(data->getOffset(id))),
-                  proofBuilder.getNamedAttr("size",proofBuilder.getI64IntegerAttr(data->getAllocatedSize(id))),
-                  proofBuilder.getNamedAttr("type",TypeAttr::get(alloc.getType())),
-                  proofBuilder.getNamedAttr("payload",proofBuilder.getBoolAttr(op->hasAttr(triton::HCU::static_pipe::payloadAttr)))}));
+          if (auto alloc = dyn_cast<triton::gpu::LocalAllocOp>(op)) {
+            id = data->getBufferId(alloc.getResult());
+            if (id != Allocation::InvalidBufferId) {
+              all.push_back({id, op});
+              explicitAudit.push_back(proofBuilder.getDictionaryAttr(
+                  {proofBuilder.getNamedAttr(
+                       "offset",
+                       proofBuilder.getI64IntegerAttr(data->getOffset(id))),
+                   proofBuilder.getNamedAttr("size",
+                                             proofBuilder.getI64IntegerAttr(
+                                                 data->getAllocatedSize(id))),
+                   proofBuilder.getNamedAttr("type",
+                                             TypeAttr::get(alloc.getType())),
+                   proofBuilder.getNamedAttr(
+                       "payload",
+                       proofBuilder.getBoolAttr(op->hasAttr(
+                           triton::HCU::static_pipe::payloadAttr)))}));
             }
           }
         });
-        for(auto [id,op]:scratch) {
-          auto lo=data->getOffset(id),size=data->getAllocatedSize(id);
-          auto actual=op->getAttrOfType<IntegerAttr>("allocation.offset");
-          if(!actual || actual.getInt()!=lo || lo+size>allocation.getSharedMemorySize())bad=true;
-          for(auto [other,otherOp]:all) if(other!=id) {
-            auto o=data->getOffset(other),n=data->getAllocatedSize(other);
-            if(lo<o+n && o<lo+size)bad=true;
-          }
-          audit.push_back(proofBuilder.getDictionaryAttr({
-              proofBuilder.getNamedAttr("offset",proofBuilder.getI64IntegerAttr(lo)),
-              proofBuilder.getNamedAttr("size",proofBuilder.getI64IntegerAttr(size)),
-              proofBuilder.getNamedAttr("source",TypeAttr::get(op->getOperand(0).getType())),
-              proofBuilder.getNamedAttr("target",TypeAttr::get(op->getResult(0).getType()))}));
+        for (auto [id, op] : scratch) {
+          auto lo = data->getOffset(id), size = data->getAllocatedSize(id);
+          auto actual = op->getAttrOfType<IntegerAttr>("allocation.offset");
+          if (!actual || actual.getInt() != lo ||
+              lo + size > allocation.getSharedMemorySize())
+            bad = true;
+          for (auto [other, otherOp] : all)
+            if (other != id) {
+              auto o = data->getOffset(other),
+                   n = data->getAllocatedSize(other);
+              if (lo < o + n && o < lo + size)
+                bad = true;
+            }
+          audit.push_back(proofBuilder.getDictionaryAttr(
+              {proofBuilder.getNamedAttr("offset",
+                                         proofBuilder.getI64IntegerAttr(lo)),
+               proofBuilder.getNamedAttr("size",
+                                         proofBuilder.getI64IntegerAttr(size)),
+               proofBuilder.getNamedAttr(
+                   "source", TypeAttr::get(op->getOperand(0).getType())),
+               proofBuilder.getNamedAttr(
+                   "target", TypeAttr::get(op->getResult(0).getType()))}));
         }
       });
-      if(bad) {mod.emitError("wave-local scratch allocation overlaps, exceeds LDS, or has stale codegen offsets");return signalPassFailure();}
-      mod->setAttr("tle.hcu.scratch_allocation_audit",proofBuilder.getArrayAttr(audit));
-      mod->setAttr("tle.hcu.pipe_explicit_allocations",proofBuilder.getArrayAttr(explicitAudit));
+      if (bad) {
+        mod.emitError("wave-local scratch allocation overlaps, exceeds LDS, or "
+                      "has stale codegen offsets");
+        return signalPassFailure();
+      }
+      mod->setAttr("tle.hcu.scratch_allocation_audit",
+                   proofBuilder.getArrayAttr(audit));
+      mod->setAttr("tle.hcu.pipe_explicit_allocations",
+                   proofBuilder.getArrayAttr(explicitAudit));
     }
 
     if (targetInfo.requiresAliasInfoForAsyncOps())
