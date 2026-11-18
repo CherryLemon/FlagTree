@@ -47,6 +47,7 @@ class TopK32Plan:
 
     NaNs rank first and keep their input bit patterns. Each call overwrites the
     owned output and scratch. Use separate plans for concurrent execution.
+    Input, output and scratch spans must fit the validated buffer extent.
     """
 
     def __init__(self, x, *, tile=None, waves=None):
@@ -65,6 +66,17 @@ class TopK32Plan:
         self.x = x
         self.tile, self.waves = tile, waves
         self.tiles = triton.cdiv(self.width, self.tile)
+        # Match the other HCU plans' byte bound and keep every row offset in
+        # signed int32 range before allocating workspace or launching a kernel.
+        extents = (
+            ("input", self.rows * self.width * x.element_size()),
+            ("workspace", self.rows * self.tiles * 32 * 4),
+            ("values", self.rows * 32 * x.element_size()),
+            ("indices", self.rows * 32 * 8),
+        )
+        for name, size in extents:
+            if size > 0x7ffffffe:
+                raise ValueError(f"{name} exceeds the validated buffer extent")
         self.partial = torch.empty((self.rows, self.tiles, 32), device=x.device, dtype=torch.uint32)
         self.values = torch.empty((self.rows, 32), device=x.device, dtype=x.dtype)
         self.indices = torch.empty((self.rows, 32), device=x.device, dtype=torch.int64)
